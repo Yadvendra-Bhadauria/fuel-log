@@ -51,7 +51,7 @@ A local-first nutrition and movement tracker. The React client is a responsive i
    npm run build
    ```
 
-   The Vite build emits static assets to the root `public/` folder for Vercel. Connect the private GitHub repository to Vercel; the root `index.ts` exports the Express app.
+   Vercel uses `vercel.json` to route `/api/*` to the Express service and other paths to the Vite app. Connect the private GitHub repository to Vercel and deploy the review branch for a preview.
 
 ## Data and privacy
 
