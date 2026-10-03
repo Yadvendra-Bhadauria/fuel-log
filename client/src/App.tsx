@@ -5,7 +5,7 @@ import {
   Upload, Utensils, X,
 } from "lucide-react";
 import { scaleNutrition, type DayRecord, type FoodEntry, type GoalType, type Meal, type MealAnalysisItem, type ProductMatch, type Settings, type WeightPlan, type Workout } from "@fuel-log/shared";
-import GoogleLogin, { type AuthUser } from "./GoogleLogin";
+import AuthPage, { type AuthUser } from "./AuthPage";
 
 type Tab = "today" | "progress" | "goals";
 type ReviewItem = MealAnalysisItem & { base: MealAnalysisItem };
@@ -33,7 +33,7 @@ const number = (value: number | null | undefined) => Math.round(value ?? 0).toLo
 const fieldNumber = (value: string) => value === "" ? null : Number(value);
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const token = sessionStorage.getItem("fuel-google-token");
+  const token = sessionStorage.getItem("fuel-session-token");
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -80,7 +80,7 @@ async function preparePhoto(file: File) {
 }
 
 function App() {
-  const [authConfig, setAuthConfig] = useState<{ required: boolean; configured: boolean; clientId: string | null } | null>(null);
+  const [authConfig, setAuthConfig] = useState<{ required: boolean } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [tab, setTab] = useState<Tab>("today");
@@ -111,7 +111,7 @@ function App() {
   const [scanBusy, setScanBusy] = useState(false);
   const [scanNote, setScanNote] = useState("");
   const [scanStatus, setScanStatus] = useState<PhotoScanStatus | null>(null);
-  const [photoConsent, setPhotoConsent] = useState(() => localStorage.getItem("fuel-google-photo-consent") === "accepted");
+  const [photoConsent, setPhotoConsent] = useState(() => localStorage.getItem("fuel-photo-consent") === "accepted");
   const [reviewPhoto, setReviewPhoto] = useState("");
   const [reviewThumbnail, setReviewThumbnail] = useState("");
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
@@ -140,7 +140,7 @@ function App() {
 
   useEffect(() => {
     const expireSession = () => {
-      sessionStorage.removeItem("fuel-google-token");
+      sessionStorage.removeItem("fuel-session-token");
       setAuthUser(null);
     };
     window.addEventListener("fuel-auth-expired", expireSession);
@@ -151,18 +151,18 @@ function App() {
     let active = true;
     const initializeAuth = async () => {
       try {
-        const config = await api<{ required: boolean; configured: boolean; clientId: string | null }>("/api/auth/config");
+        const config = await api<{ required: boolean }>("/api/auth/config");
         if (!active) return;
         setAuthConfig(config);
-        if (config.required && config.configured && sessionStorage.getItem("fuel-google-token")) {
+        if (config.required && sessionStorage.getItem("fuel-session-token")) {
           try {
             setAuthUser(await api<AuthUser>("/api/auth/me"));
           } catch {
-            sessionStorage.removeItem("fuel-google-token");
+            sessionStorage.removeItem("fuel-session-token");
           }
         }
       } catch {
-        if (active) setAuthConfig({ required: true, configured: false, clientId: null });
+        if (active) setAuthConfig({ required: true });
       } finally {
         if (active) setAuthLoading(false);
       }
@@ -324,8 +324,8 @@ function App() {
 
   const setGooglePhotoConsent = (accepted: boolean) => {
     setPhotoConsent(accepted);
-    if (accepted) localStorage.setItem("fuel-google-photo-consent", "accepted");
-    else localStorage.removeItem("fuel-google-photo-consent");
+    if (accepted) localStorage.setItem("fuel-photo-consent", "accepted");
+    else localStorage.removeItem("fuel-photo-consent");
   };
 
   const updateReviewGrams = (index: number, grams: number) => {
@@ -359,15 +359,20 @@ function App() {
     { id: "goals" as const, label: "Goals", icon: Settings2 },
   ];
 
-  const signOut = () => {
-    sessionStorage.removeItem("fuel-google-token");
+  const signOut = async () => {
+    try {
+      await api<void>("/api/auth/logout", { method: "POST" });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not sign out cleanly.");
+      return;
+    }
+    sessionStorage.removeItem("fuel-session-token");
     setAuthUser(null);
     setDay(null);
   };
 
   if (authLoading || authConfig === null) return <div className="auth-loading"><span className="loader" />Checking sign-in</div>;
-  if (authConfig.required && !authConfig.configured) return <GoogleLogin clientId={null} onSignIn={setAuthUser} />;
-  if (authConfig.required && !authUser) return <GoogleLogin clientId={authConfig.clientId} onSignIn={setAuthUser} />;
+  if (authConfig.required && !authUser) return <AuthPage onSignIn={setAuthUser} />;
 
   return (
     <div className="app-shell">

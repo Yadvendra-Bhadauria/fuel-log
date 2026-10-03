@@ -5,9 +5,9 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaLibSQL } from "@prisma/adapter-libsql";
-import { OAuth2Client } from "google-auth-library";
 import { z } from "zod";
 import type { Meal, MealAnalysis, MealAnalysisItem, Settings, WeightPlanInput } from "@fuel-log/shared";
+import { createSessionToken, hashPassword, hashSessionToken, verifyPassword } from "./auth.js";
 import { buildWeightPlan } from "./calculations.js";
 import { crossCheckItems, findProduct } from "./nutrition.js";
 import { FREE_MEAL_SCANS_PER_DAY, getFreeScanStatus } from "./scanQuota.js";
@@ -27,20 +27,12 @@ const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const geminiApiKey = process.env.GEMINI_API_KEY?.trim() ?? "";
 const GEMINI_MODEL = "gemini-2.5-flash";
-const googleClientId = process.env.GOOGLE_CLIENT_ID?.trim() ?? "";
-const googleAuthConfigured = Boolean(googleClientId);
-const authRequired = process.env.NODE_ENV === "production" || googleAuthConfigured;
-const googleClient = new OAuth2Client(googleClientId || undefined);
+const authRequired = process.env.NODE_ENV === "production";
+const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 
-class AuthError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-  }
-}
-
-type AuthIdentity = { email: string; name: string; picture: string | null };
-type AuthenticatedRequest = express.Request & { authIdentity?: AuthIdentity };
-const userIdFor = (request: express.Request) => (request as AuthenticatedRequest).authIdentity?.email ?? "local";
+type AuthIdentity = { id: string; email: string; name: string; picture: string | null };
+type AuthenticatedRequest = express.Request & { authIdentity?: AuthIdentity; sessionTokenHash?: string };
+const userIdFor = (request: express.Request) => (request as AuthenticatedRequest).authIdentity?.id ?? "local";
 const settingsIdFor = (userId: string) => userId === "local" ? "default" : userId;
 
 class ScanLimitError extends Error {}
@@ -68,25 +60,6 @@ async function releasePhotoScan(userId: string, date: string) {
   await prisma.photoScanUsage.updateMany({ where: { userId, date, scans: { gt: 0 } }, data: { scans: { decrement: 1 } } });
 }
 
-async function verifyGoogleCredential(credential: string): Promise<AuthIdentity> {
-  if (!googleClientId) throw new AuthError(503, "Google sign-in is not configured.");
-  let payload;
-  try {
-    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: googleClientId });
-    payload = ticket.getPayload();
-  } catch {
-    throw new AuthError(401, "Your Google sign-in expired. Please sign in again.");
-  }
-  const email = payload?.email?.toLowerCase();
-  if (!payload || !email || payload.email_verified !== true) {
-    throw new AuthError(401, "Use a verified Google account to continue.");
-  }
-  if (!email.endsWith("@gmail.com")) {
-    throw new AuthError(403, "Sign up with a verified Gmail account to access Fuel log.");
-  }
-  return { email, name: payload.name ?? email, picture: payload.picture ?? null };
-}
-
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:5173";
 const isLocalDevelopmentOrigin = (origin: string) => {
   try {
@@ -111,55 +84,113 @@ app.use(cors({ origin: (origin, callback) => {
 app.use(express.json({ limit: "7mb" }));
 
 app.use("/api", async (request, response, next) => {
-  const publicAuthPaths = ["/health", "/auth/config", "/auth/google"];
+  const publicAuthPaths = ["/health", "/auth/config", "/auth/register", "/auth/login"];
   if (publicAuthPaths.includes(request.path)) return next();
-  if (!authRequired) return next();
-  if (!googleAuthConfigured) return response.status(503).json({ error: "Google sign-in is required but not configured." });
   const credential = request.header("authorization")?.match(/^Bearer (.+)$/i)?.[1];
-  if (!credential) return response.status(401).json({ error: "Sign in with your Google account to continue." });
+  if (!credential) {
+    if (!authRequired) return next();
+    return response.status(401).json({ error: "Sign in to your Fuel Log account to continue." });
+  }
   try {
-    (request as AuthenticatedRequest).authIdentity = await verifyGoogleCredential(credential);
+    const tokenHash = hashSessionToken(credential);
+    const session = await prisma.session.findFirst({
+      where: { tokenHash, expiresAt: { gt: new Date() } },
+      include: { user: true },
+    });
+    if (!session) return response.status(401).json({ error: "Your session expired. Please sign in again." });
+    (request as AuthenticatedRequest).authIdentity = {
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name,
+      picture: null,
+    };
+    (request as AuthenticatedRequest).sessionTokenHash = tokenHash;
     next();
   } catch (error) {
-    const authError = error instanceof AuthError ? error : new AuthError(401, "Your Google sign-in could not be verified.");
-    response.status(authError.status).json({ error: authError.message });
+    next(error);
   }
 });
 
 app.use("/api", (request, response, next) => {
-  const publicAuthPaths = ["/health", "/auth/config", "/auth/google"];
+  const publicAuthPaths = ["/health", "/auth/config"];
   if (publicAuthPaths.includes(request.path) || process.env.VERCEL !== "1") return next();
   if (!tursoUrl || !tursoToken) return response.status(503).json({ error: "The production database is not configured yet." });
   next();
 });
 
 app.get("/api/auth/config", (_request, response) => {
-  response.json({
-    required: authRequired,
-    configured: googleAuthConfigured,
-    clientId: googleClientId || null,
-  });
+  response.json({ required: authRequired });
 });
 
-const googleAuthLimiter = rateLimit({
+const authLimiter = rateLimit({
   windowMs: 60_000,
-  limit: 20,
+  limit: 10,
   standardHeaders: "draft-7",
   legacyHeaders: false,
-  message: { error: "Too many sign-in attempts. Please wait a minute and try again." },
+  message: { error: "Too many account attempts. Please wait a minute and try again." },
 });
-app.post("/api/auth/google", googleAuthLimiter, async (request, response, next) => {
+const registerSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+  password: z.string().min(12).max(128),
+});
+const loginSchema = z.object({
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+  password: z.string().min(1).max(128),
+});
+
+async function createAuthSession(user: { id: string; email: string; name: string }) {
+  const token = createSessionToken();
+  await prisma.session.create({
+    data: {
+      tokenHash: hashSessionToken(token),
+      userId: user.id,
+      expiresAt: new Date(Date.now() + SESSION_DURATION_MS),
+    },
+  });
+  return { token, user: { id: user.id, email: user.email, name: user.name, picture: null } };
+}
+
+app.post("/api/auth/register", authLimiter, async (request, response, next) => {
   try {
-    const { credential } = z.object({ credential: z.string().min(1).max(8192) }).parse(request.body);
-    response.json(await verifyGoogleCredential(credential));
+    const { name, email, password } = registerSchema.parse(request.body);
+    const user = await prisma.user.create({
+      data: { name, email, passwordHash: await hashPassword(password) },
+    });
+    response.status(201).json(await createAuthSession(user));
   } catch (error) {
-    if (error instanceof AuthError) return response.status(error.status).json({ error: error.message });
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return response.status(409).json({ error: "An account with this email already exists. Sign in instead." });
+    }
+    next(error);
+  }
+});
+
+app.post("/api/auth/login", authLimiter, async (request, response, next) => {
+  try {
+    const { email, password } = loginSchema.parse(request.body);
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || !await verifyPassword(password, user.passwordHash)) {
+      return response.status(401).json({ error: "Email or password is incorrect." });
+    }
+    response.json(await createAuthSession(user));
+  } catch (error) {
     next(error);
   }
 });
 
 app.get("/api/auth/me", (request, response) => {
   response.json((request as AuthenticatedRequest).authIdentity);
+});
+
+app.post("/api/auth/logout", async (request, response, next) => {
+  try {
+    const tokenHash = (request as AuthenticatedRequest).sessionTokenHash;
+    if (tokenHash) await prisma.session.delete({ where: { tokenHash } });
+    response.status(204).end();
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.get("/api/meal-scans/status", async (request, response, next) => {
