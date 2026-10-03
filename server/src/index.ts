@@ -7,7 +7,7 @@ import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaLibSQL } from "@prisma/adapter-libsql";
 import { z } from "zod";
 import type { Meal, MealAnalysis, MealAnalysisItem, Settings, WeightPlanInput } from "@fuel-log/shared";
-import { createSessionToken, hashPassword, hashSessionToken, verifyPassword } from "./auth.js";
+import { createPasswordResetToken, createSessionToken, hashPassword, hashPasswordResetToken, hashSessionToken, isValidPasswordPassphrase, verifyPassword } from "./auth.js";
 import { buildWeightPlan } from "./calculations.js";
 import { crossCheckItems, findProduct } from "./nutrition.js";
 import { FREE_MEAL_SCANS_PER_DAY, getFreeScanStatus } from "./scanQuota.js";
@@ -26,9 +26,13 @@ const prisma = new PrismaClient({ adapter: prismaAdapter });
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const geminiApiKey = process.env.GEMINI_API_KEY?.trim() ?? "";
+const resendApiKey = process.env.RESEND_API_KEY?.trim() ?? "";
+const resendFromEmail = process.env.RESEND_FROM_EMAIL?.trim() ?? "";
+const passwordResetEnabled = Boolean(resendApiKey && resendFromEmail);
 const GEMINI_MODEL = "gemini-2.5-flash";
 const authRequired = process.env.NODE_ENV === "production";
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
+const PASSWORD_RESET_DURATION_MS = 30 * 60 * 1000;
 
 type AuthIdentity = { id: string; email: string; name: string; picture: string | null };
 type AuthenticatedRequest = express.Request & { authIdentity?: AuthIdentity; sessionTokenHash?: string };
@@ -84,7 +88,7 @@ app.use(cors({ origin: (origin, callback) => {
 app.use(express.json({ limit: "7mb" }));
 
 app.use("/api", async (request, response, next) => {
-  const publicAuthPaths = ["/health", "/auth/config", "/auth/register", "/auth/login"];
+  const publicAuthPaths = ["/health", "/auth/config", "/auth/register", "/auth/login", "/auth/password-reset/request", "/auth/password-reset/complete"];
   if (publicAuthPaths.includes(request.path)) return next();
   const credential = request.header("authorization")?.match(/^Bearer (.+)$/i)?.[1];
   if (!credential) {
@@ -114,12 +118,12 @@ app.use("/api", async (request, response, next) => {
 app.use("/api", (request, response, next) => {
   const publicAuthPaths = ["/health", "/auth/config"];
   if (publicAuthPaths.includes(request.path) || process.env.VERCEL !== "1") return next();
-  if (!tursoUrl || !tursoToken) return response.status(503).json({ error: "The production database is not configured yet." });
+  if (!tursoUrl || !tursoToken) return response.status(503).json({ error: "The production database is not configured yet. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the deployment environment." });
   next();
 });
 
 app.get("/api/auth/config", (_request, response) => {
-  response.json({ required: authRequired });
+  response.json({ required: authRequired, passwordResetEnabled });
 });
 
 const authLimiter = rateLimit({
@@ -132,11 +136,36 @@ const authLimiter = rateLimit({
 const registerSchema = z.object({
   name: z.string().trim().min(1).max(80),
   email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
-  password: z.string().min(12).max(128),
+  password: z.string().min(1).max(128).refine(isValidPasswordPassphrase, {
+    message: "Choose a password with at least 7 words.",
+  }),
 });
 const loginSchema = z.object({
   email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
   password: z.string().min(1).max(128),
+});
+const passwordResetRequestSchema = z.object({
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+});
+const passwordResetSchema = z.object({
+  token: z.string().min(1).max(128),
+  password: z.string().min(1).max(128).refine(isValidPasswordPassphrase, {
+    message: "Choose a password with at least 7 words.",
+  }),
+});
+const passwordResetRequestLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 5,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many reset requests. Please wait before trying again." },
+});
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many password reset attempts. Please wait before trying again." },
 });
 
 async function createAuthSession(user: { id: string; email: string; name: string }) {
@@ -174,6 +203,82 @@ app.post("/api/auth/login", authLimiter, async (request, response, next) => {
       return response.status(401).json({ error: "Email or password is incorrect." });
     }
     response.json(await createAuthSession(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/password-reset/request", passwordResetRequestLimiter, async (request, response, next) => {
+  try {
+    if (!passwordResetEnabled) return response.status(503).json({ error: "Password reset email is not configured yet." });
+    const { email } = passwordResetRequestSchema.parse(request.body);
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return response.status(202).json({ message: "If an account exists for that email, a reset link will be sent." });
+
+    const token = createPasswordResetToken();
+    const tokenHash = hashPasswordResetToken(token);
+    await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
+    await prisma.passwordResetToken.create({
+      data: { tokenHash, userId: user.id, expiresAt: new Date(Date.now() + PASSWORD_RESET_DURATION_MS) },
+    });
+
+    const resetUrl = new URL("/", clientOrigin);
+    resetUrl.searchParams.set("resetToken", token);
+    try {
+      const emailResponse = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${resendApiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          from: resendFromEmail,
+          to: [user.email],
+          subject: "Reset your Fuel log password",
+          text: `Use this link to reset your Fuel log password. The link expires in 30 minutes and can only be used once:\n\n${resetUrl.toString()}\n\nIf you did not request this, you can ignore this email.`,
+          html: `<p>Use the link below to reset your Fuel log password. It expires in 30 minutes and can only be used once.</p><p><a href="${resetUrl.toString()}">Reset your password</a></p><p>If you did not request this, you can ignore this email.</p>`,
+        }),
+      });
+      if (!emailResponse.ok) {
+        console.error("Password reset email delivery failed with status", emailResponse.status);
+        await prisma.passwordResetToken.delete({ where: { tokenHash } });
+        return response.status(503).json({ error: "Could not send the reset email. Please try again later." });
+      }
+    } catch (error) {
+      console.error("Password reset email delivery failed:", error);
+      await prisma.passwordResetToken.delete({ where: { tokenHash } });
+      return response.status(503).json({ error: "Could not send the reset email. Please try again later." });
+    }
+
+    response.status(202).json({ message: "If an account exists for that email, a reset link will be sent." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/password-reset/complete", passwordResetLimiter, async (request, response, next) => {
+  try {
+    const { token, password } = passwordResetSchema.parse(request.body);
+    const tokenHash = hashPasswordResetToken(token);
+    const passwordHash = await hashPassword(password);
+    const now = new Date();
+
+    const reset = await prisma.$transaction(async (transaction) => {
+      const resetToken = await transaction.passwordResetToken.findFirst({
+        where: { tokenHash, expiresAt: { gt: now } },
+      });
+      if (!resetToken) return false;
+
+      const consumed = await transaction.passwordResetToken.deleteMany({
+        where: { tokenHash, expiresAt: { gt: now } },
+      });
+      if (consumed.count !== 1) return false;
+
+      await transaction.user.update({ where: { id: resetToken.userId }, data: { passwordHash } });
+      await transaction.passwordResetToken.deleteMany({ where: { userId: resetToken.userId } });
+      await transaction.session.deleteMany({ where: { userId: resetToken.userId } });
+      return true;
+    });
+
+    if (!reset) return response.status(400).json({ error: "This password reset link is invalid or expired. Request a new one." });
+    response.json({ message: "Your password has been reset. Sign in with your new password." });
   } catch (error) {
     next(error);
   }

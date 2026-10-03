@@ -14,7 +14,7 @@ A local-first nutrition and movement tracker. The React client is a responsive i
 - Node.js 20 or newer and npm 10 or newer.
 - A Gemini API key from Google AI Studio's Free plan to enable photo meal estimates. Photo scans are capped at three per UTC day.
 - A USDA API key is optional; Open Food Facts works without a key.
-- No OAuth project or email-sending service is required for account sign-up.
+- No OAuth project or email-sending service is required for account sign-up. Password reset uses Resend when configured.
 - A Turso Free database URL and auth token for persistent Vercel data storage.
 
 ## Setup
@@ -25,11 +25,11 @@ A local-first nutrition and movement tracker. The React client is a responsive i
    npm install
    ```
 
-2. Copy `.env.example` to `.env` and add API keys as needed. Keep `GEMINI_API_KEY` and `USDA_API_KEY` in this server-side file. Vite does not expose these values to the browser.
+2. Copy `.env.example` to `.env` and add API keys as needed. Keep `GEMINI_API_KEY`, `USDA_API_KEY`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL` in this server-side file. Vite does not expose these values to the browser.
 
-3. Accounts use an email address and password; no Google Cloud project or OAuth credentials are needed. Passwords must be at least 12 characters and are stored as scrypt hashes. Email addresses are not verified and there is no password-reset flow, so users who forget a password cannot recover that account. Each account has a separate private log. Authentication is required in production; local development can run without signing in.
+3. Accounts use an email address and password; no Google Cloud project or OAuth credentials are needed. New passwords must contain at least seven whitespace-separated words (punctuation and numbers are allowed), and are stored as scrypt hashes. Existing passwords remain usable for sign-in. Email addresses are not verified. Each account has a separate private log. Authentication is required in production; local development can run without signing in.
 
-4. For production, create a new, empty database on the Turso Free plan. Add `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` to `.env` and Vercel's environment settings, then run `npm run db:turso:init --workspace server` once. The initializer refuses non-empty databases to avoid overwriting older single-user data. The local SQLite database and its personal logs are not uploaded. Disable Turso overages to keep storage at $0.
+4. For production, create a new, empty database on the Turso Free plan. Add `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` to `.env` and Vercel's Production environment settings, then run `npm run db:turso:init --workspace server` once. The initializer refuses non-empty databases to avoid overwriting older single-user data. The local SQLite database and its personal logs are not uploaded. Disable Turso overages to keep storage at $0.
 
 5. Create or update the local SQLite database:
 
@@ -45,9 +45,11 @@ A local-first nutrition and movement tracker. The React client is a responsive i
 
    The client is at `http://localhost:5173`; the API is at `http://localhost:3001`. On a phone, use the computer's LAN address and HTTPS if the browser requires a secure context for camera access.
 
-7. For the Vercel deployment, configure `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the project's Production environment settings, initialize the empty Turso database, and redeploy. Accounts cannot be created until the database is connected. Photo estimates additionally require `GEMINI_API_KEY`; USDA lookups optionally use `USDA_API_KEY`.
+7. For the Vercel deployment, configure `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in the project's Production environment settings, initialize the empty Turso database, and redeploy. Login and account creation return “The production database is not configured yet” until both Turso variables are set in the deployed environment. Photo estimates additionally require `GEMINI_API_KEY`; USDA lookups optionally use `USDA_API_KEY`.
 
-8. To create production bundles:
+8. To enable forgot-password emails, create a Resend API key and verify the sender domain, then set `RESEND_API_KEY` and `RESEND_FROM_EMAIL` in `.env` and Vercel's Production environment settings. Set `CLIENT_ORIGIN` to the deployed site's origin so reset links return to the right app, then redeploy. Reset links expire after 30 minutes and are single-use. Run `npm run db:push` for local SQLite. The Turso initializer includes the reset-token table for new databases; for an existing Turso database, run `npm run db:turso:migrate-password-reset --workspace server` once before redeploying.
+
+9. To create production bundles:
 
    ```sh
    npm run build

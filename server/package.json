@@ -10,7 +10,8 @@
     "test": "vitest run",
     "db:push": "dotenv -e ../.env -- prisma db push --schema prisma/schema.prisma",
     "db:studio": "dotenv -e ../.env -- prisma studio --schema prisma/schema.prisma",
-    "db:turso:init": "dotenv -e ../.env -- tsx scripts/init-turso.ts"
+    "db:turso:init": "dotenv -e ../.env -- tsx scripts/init-turso.ts",
+    "db:turso:migrate-password-reset": "dotenv -e ../.env -- tsx scripts/migrate-password-reset.ts"
   },
   "dependencies": {
     "@fuel-log/shared": "1.0.0",

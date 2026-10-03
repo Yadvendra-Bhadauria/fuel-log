@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { Activity, Scale, ShieldCheck, Utensils } from "lucide-react";
 
 export interface AuthUser {
@@ -13,35 +13,85 @@ interface AuthResponse {
   user: AuthUser;
 }
 
-export default function AuthPage({ onSignIn }: { onSignIn: (user: AuthUser) => void }) {
-  const [mode, setMode] = useState<"signup" | "signin">("signup");
+type AuthMode = "signup" | "signin" | "forgot" | "reset";
+
+export default function AuthPage({ onSignIn, passwordResetEnabled }: {
+  onSignIn: (user: AuthUser) => void;
+  passwordResetEnabled: boolean;
+}) {
+  const [resetToken, setResetToken] = useState(() => new URLSearchParams(window.location.search).get("resetToken") ?? "");
+  const [mode, setMode] = useState<AuthMode>(() => new URLSearchParams(window.location.search).has("resetToken") ? "reset" : "signup");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [passwordConfirmation, setPasswordConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    if (resetToken) window.history.replaceState(null, "", window.location.pathname);
+  }, []);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setBusy(true);
     setError("");
+    setNotice("");
     try {
-      const response = await fetch(`/api/auth/${mode === "signup" ? "register" : "login"}`, {
+      if ((mode === "signup" || mode === "reset") && password.trim().split(/\s+/).length < 7) {
+        throw new Error("Choose a password with at least 7 words.");
+      }
+      if (mode === "reset" && password !== passwordConfirmation) {
+        throw new Error("The passwords do not match.");
+      }
+      const path = mode === "signup" ? "register"
+        : mode === "signin" ? "login"
+          : mode === "forgot" ? "password-reset/request"
+            : "password-reset/complete";
+      const body = mode === "forgot" ? { email }
+        : mode === "reset" ? { token: resetToken, password }
+          : { name, email, password };
+      const response = await fetch(`/api/auth/${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password }),
+        body: JSON.stringify(body),
       });
-      const body = await response.json() as AuthResponse | { error?: string };
-      if (!response.ok) throw new Error("error" in body ? body.error : "Could not sign in.");
-      const auth = body as AuthResponse;
-      sessionStorage.setItem("fuel-session-token", auth.token);
-      onSignIn(auth.user);
+      const responseBody = await response.json() as AuthResponse | { error?: string; message?: string };
+      if (!response.ok) throw new Error("error" in responseBody ? responseBody.error : "Could not complete this request.");
+      if (mode === "forgot") {
+        setNotice("If an account exists for that email, we’ll send a reset link. It expires in 30 minutes.");
+      } else if (mode === "reset") {
+        setNotice("Your password has been reset. Sign in with your new password.");
+        setMode("signin");
+        setPassword("");
+        setPasswordConfirmation("");
+        setResetToken("");
+        window.history.replaceState(null, "", window.location.pathname);
+      } else {
+        const auth = responseBody as AuthResponse;
+        sessionStorage.setItem("fuel-session-token", auth.token);
+        onSignIn(auth.user);
+      }
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not sign in. Please try again.");
+      setError(reason instanceof Error ? reason.message : "Could not complete this request. Please try again.");
     } finally {
       setBusy(false);
     }
   };
+
+  const isSignup = mode === "signup";
+  const isSignin = mode === "signin";
+  const isForgot = mode === "forgot";
+  const isReset = mode === "reset";
+  const title = isSignup ? "Make room for better habits."
+    : isSignin ? "Welcome back."
+      : isForgot ? "Reset your password."
+        : "Choose a new password.";
+  const copy = isSignup ? "Create a free account to start your personal log."
+    : isSignin ? "Sign in to continue to your personal log."
+      : isForgot ? "Enter your account email and we’ll send you a one-time reset link."
+        : "Choose a new password for your Fuel log account.";
 
   return <main className="auth-page"><div className="auth-layout">
     <section className="auth-story" aria-label="About Fuel log">
@@ -61,31 +111,47 @@ export default function AuthPage({ onSignIn }: { onSignIn: (user: AuthUser) => v
     <section className="auth-panel" aria-labelledby="auth-title">
       <span className="auth-shield"><ShieldCheck size={19} /></span>
       <div className="eyebrow">YOUR PRIVATE SPACE</div>
-      <h2 id="auth-title">{mode === "signup" ? "Make room for better habits." : "Welcome back."}</h2>
-      <p className="auth-copy">{mode === "signup" ? "Create a free account to start your personal log." : "Sign in to continue to your personal log."}</p>
+      <h2 id="auth-title">{title}</h2>
+      <p className="auth-copy">{copy}</p>
       <form className="auth-form" onSubmit={submit}>
-        {mode === "signup" && <label>
+        {isSignup && <label>
           <span>Your name</span>
           <input autoComplete="name" maxLength={80} onChange={(event) => setName(event.target.value)} required value={name} />
         </label>}
-        <label>
+        {!isReset && <label>
           <span>Email</span>
           <input autoComplete="email" maxLength={254} onChange={(event) => setEmail(event.target.value)} required type="email" value={email} />
-        </label>
-        <label>
-          <span>Password</span>
-          <input autoComplete={mode === "signup" ? "new-password" : "current-password"} maxLength={128} minLength={mode === "signup" ? 12 : 1} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
-        </label>
-        <button className="auth-submit" disabled={busy} type="submit">{busy ? "Please wait…" : mode === "signup" ? "Create account" : "Sign in"}</button>
+        </label>}
+        {!isForgot && <label>
+          <span>Password{(isSignup || isReset) && " (at least 7 words)"}</span>
+          <input autoComplete={isSignin ? "current-password" : "new-password"} maxLength={128} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
+        </label>}
+        {isReset && <label>
+          <span>Confirm new password</span>
+          <input autoComplete="new-password" maxLength={128} onChange={(event) => setPasswordConfirmation(event.target.value)} required type="password" value={passwordConfirmation} />
+        </label>}
+        <button className="auth-submit" disabled={busy} type="submit">{busy ? "Please wait…" : isSignup ? "Create account" : isSignin ? "Sign in" : isForgot ? "Send reset link" : "Reset password"}</button>
       </form>
       {error && <p className="form-error" role="alert">{error}</p>}
+      {notice && <p className="auth-success" role="status">{notice}</p>}
+      {isSignin && passwordResetEnabled && <button className="auth-mode-toggle" onClick={() => { setMode("forgot"); setError(""); setNotice(""); }} type="button">Forgot password?</button>}
       <p className="auth-signup-note">
-        {mode === "signup" ? "Already have an account?" : "New to Fuel log?"}{" "}
-        <button className="auth-mode-toggle" onClick={() => { setMode(mode === "signup" ? "signin" : "signup"); setError(""); }} type="button">
-          {mode === "signup" ? "Sign in" : "Create an account"}
+        {isForgot || isReset ? "Remembered your password?" : isSignup ? "Already have an account?" : "New to Fuel log?"}{" "}
+        <button className="auth-mode-toggle" onClick={() => {
+          setMode(isSignup || isForgot || isReset ? "signin" : "signup");
+          setError("");
+          setNotice("");
+          if (isReset) {
+            setResetToken("");
+            window.history.replaceState(null, "", window.location.pathname);
+          }
+        }} type="button">
+          {isSignup || isForgot || isReset ? "Sign in" : "Create an account"}
         </button>
       </p>
-      <p className="auth-privacy">Use an email address you can remember. Email addresses are not verified, and forgotten passwords cannot be recovered.</p>
+      {isSignup || isSignin
+        ? <p className="auth-privacy">{isSignup ? "Use a password with at least 7 words. Email addresses are not verified." : "Use an email address you can remember. Email addresses are not verified."}</p>
+        : isReset && <p className="auth-privacy">Use at least 7 words. Punctuation and numbers are allowed.</p>}
       <p className="auth-disclaimer">For general wellness; not a substitute for medical advice.</p>
     </section>
   </div></main>;

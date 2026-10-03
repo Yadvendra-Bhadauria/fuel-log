@@ -2,6 +2,10 @@ import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } fr
 
 const PASSWORD_KEY_LENGTH = 64;
 
+export function isValidPasswordPassphrase(password: string): boolean {
+  return password.trim().split(/\s+/).length >= 7;
+}
+
 function derivePasswordKey(password: string, salt: Buffer): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     scryptCallback(password, salt, PASSWORD_KEY_LENGTH, (error, key) => {
@@ -32,5 +36,13 @@ export function createSessionToken(): string {
 }
 
 export function hashSessionToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+export function createPasswordResetToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+export function hashPasswordResetToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }

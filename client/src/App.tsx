@@ -80,7 +80,7 @@ async function preparePhoto(file: File) {
 }
 
 function App() {
-  const [authConfig, setAuthConfig] = useState<{ required: boolean } | null>(null);
+  const [authConfig, setAuthConfig] = useState<{ required: boolean; passwordResetEnabled: boolean } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [tab, setTab] = useState<Tab>("today");
@@ -151,7 +151,7 @@ function App() {
     let active = true;
     const initializeAuth = async () => {
       try {
-        const config = await api<{ required: boolean }>("/api/auth/config");
+        const config = await api<{ required: boolean; passwordResetEnabled: boolean }>("/api/auth/config");
         if (!active) return;
         setAuthConfig(config);
         if (config.required && sessionStorage.getItem("fuel-session-token")) {
@@ -162,7 +162,7 @@ function App() {
           }
         }
       } catch {
-        if (active) setAuthConfig({ required: true });
+        if (active) setAuthConfig({ required: true, passwordResetEnabled: false });
       } finally {
         if (active) setAuthLoading(false);
       }
@@ -372,7 +372,10 @@ function App() {
   };
 
   if (authLoading || authConfig === null) return <div className="auth-loading"><span className="loader" />Checking sign-in</div>;
-  if (authConfig.required && !authUser) return <AuthPage onSignIn={setAuthUser} />;
+  if (new URLSearchParams(window.location.search).has("resetToken")) {
+    return <AuthPage onSignIn={setAuthUser} passwordResetEnabled={authConfig.passwordResetEnabled} />;
+  }
+  if (authConfig.required && !authUser) return <AuthPage onSignIn={setAuthUser} passwordResetEnabled={authConfig.passwordResetEnabled} />;
 
   return (
     <div className="app-shell">
