@@ -4,6 +4,7 @@ import cors from "cors";
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { Prisma, PrismaClient } from "@prisma/client";
+import { PrismaLibSQL } from "@prisma/adapter-libsql";
 import { OAuth2Client } from "google-auth-library";
 import { z } from "zod";
 import type { Meal, MealAnalysis, MealAnalysisItem, Settings, WeightPlanInput } from "@fuel-log/shared";
@@ -14,7 +15,14 @@ import { FREE_MEAL_SCANS_PER_DAY, getFreeScanStatus } from "./scanQuota.js";
 dotenv.config({ path: resolve(process.cwd(), "../.env") });
 dotenv.config();
 
-const prisma = new PrismaClient();
+const tursoUrl = process.env.TURSO_DATABASE_URL;
+const tursoToken = process.env.TURSO_AUTH_TOKEN;
+const sqliteFile = process.env.DATABASE_URL?.replace(/^file:/, "") ?? "./dev.db";
+const localDatabaseUrl = `file:${resolve(process.cwd(), "prisma", sqliteFile)}`;
+const prismaAdapter = new PrismaLibSQL(tursoUrl && tursoToken
+  ? { url: tursoUrl, authToken: tursoToken }
+  : { url: localDatabaseUrl });
+const prisma = new PrismaClient({ adapter: prismaAdapter });
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const geminiApiKey = process.env.GEMINI_API_KEY?.trim() ?? "";
@@ -115,6 +123,13 @@ app.use("/api", async (request, response, next) => {
     const authError = error instanceof AuthError ? error : new AuthError(401, "Your Google sign-in could not be verified.");
     response.status(authError.status).json({ error: authError.message });
   }
+});
+
+app.use("/api", (request, response, next) => {
+  const publicAuthPaths = ["/health", "/auth/config", "/auth/google"];
+  if (publicAuthPaths.includes(request.path) || process.env.VERCEL !== "1") return next();
+  if (!tursoUrl || !tursoToken) return response.status(503).json({ error: "The production database is not configured yet." });
+  next();
 });
 
 app.get("/api/auth/config", (_request, response) => {
@@ -430,6 +445,7 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
   response.status(500).json({ error: message.includes("not found") ? "That log entry could not be found." : "Something went wrong. Please try again." });
 });
 
-app.listen(port, () => console.log(`Fuel log API listening on http://localhost:${port}`));
+if (process.env.VERCEL !== "1") app.listen(port, () => console.log(`Fuel log API listening on http://localhost:${port}`));
 
 export { app, prisma, type Meal };
+export default app;

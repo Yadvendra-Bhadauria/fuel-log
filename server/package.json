@@ -4,14 +4,18 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "generate": "prisma generate --schema prisma/schema.prisma",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server/src/index.js",
     "test": "vitest run",
     "db:push": "dotenv -e ../.env -- prisma db push --schema prisma/schema.prisma",
-    "db:studio": "dotenv -e ../.env -- prisma studio --schema prisma/schema.prisma"
+    "db:studio": "dotenv -e ../.env -- prisma studio --schema prisma/schema.prisma",
+    "db:turso:init": "dotenv -e ../.env -- tsx scripts/init-turso.ts"
   },
   "dependencies": {
     "@fuel-log/shared": "1.0.0",
+    "@libsql/client": "^0.17.0",
+    "@prisma/adapter-libsql": "^6.19.3",
     "@prisma/client": "^6.4.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
