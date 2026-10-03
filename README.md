@@ -1,13 +1,13 @@
-# Fuel log
+# Fitbiter
 
-A local-first nutrition and movement tracker. The React client is a responsive installable PWA; the Express API stores records in SQLite through Prisma. Photo estimates are reviewed before they are logged. The Goals tab can build a target-weight plan from current weight, target weight, height, age, sex, activity, and goal direction, with a starting calorie intake and approximate timeline.
+Stay fit. Log your bits. Fitbiter is a local-first nutrition and movement tracker built around the idea that small daily choices add up. The React client is a responsive installable PWA; the Express API stores records in SQLite through Prisma. Food entries confirm when saved. The Workout plan tab creates beginner routines based on the user's goal, available days and session length, and available equipment; generated plans remain editable. Exercise video links open YouTube search results without requiring an API key. Photo estimates are reviewed before they are logged. The Goals tab can build a target-weight plan from current weight, target weight, height, age, sex, activity, and goal direction, with a starting calorie intake and approximate timeline.
 
 ## Structure
 
 - `client/` — React, TypeScript, Vite, Tailwind CSS, PWA manifest, charts, and camera workflows.
 - `server/` — Express API, Anthropic image analysis, nutrition lookups, and Prisma persistence.
 - `shared/` — Shared API contracts and nutrition scaling.
-- `server/prisma/schema.prisma` — SQLite schema for settings, date-based logs, food, and workouts.
+- `server/prisma/schema.prisma` — SQLite schema for settings, date-based logs, food, completed workouts, and weekly workout plans.
 
 ## Requirements
 
@@ -59,7 +59,9 @@ A local-first nutrition and movement tracker. The React client is a responsive i
 
 ## Data and privacy
 
-The app starts with no seeded records. Set goals from the Goals tab. Log data is stored in `server/prisma/dev.db`. Meal images are resized in the browser, converted to JPEG, and stripped of metadata before analysis. Images are not retained unless “Keep meal thumbnails” is enabled; then a small thumbnail is attached to the food entry. The original upload is never stored by the API.
+The app starts with no seeded records. Set goals from the Goals tab and generate or edit a weekly routine from Workout plan. The generator supports 2-7 training days; lower-frequency plans use full-body sessions, and higher-frequency plans balance strength with easier activity or recovery. Session duration changes exercise selection and volume: short sessions prioritize a couple of movements, while longer sessions include more exercises, sets, and rest time. Generated training days include timed warm-ups and cool-down/stretching; links open duration- and workout-focused YouTube searches for guided videos. For a full gym and 5-7 training days, users can choose the balanced plan, a push/pull/legs split, or an experienced one-muscle-group-per-day style. Exercise name suggestions come from the free [wger exercise API](https://wger.de/en/software/api); the picker keeps custom exercise names available when the API is unavailable. Names display wger contributor and licence attribution. Its movements and weekly activity guidance draw on the [NHS strength exercise guide](https://www.nhs.uk/live-well/exercise/strength-exercises/) and [NHS adult activity guidelines](https://www.nhs.uk/live-well/exercise/physical-activity-guidelines-for-adults-aged-19-to-64/). It is a conservative beginner starting point, not medical or individualized professional advice. Log data is stored in `server/prisma/dev.db`. The workout plan and its generation preferences are stored separately from completed daily workout logs and are private to each account. Meal images are resized in the browser, converted to JPEG, and stripped of metadata before analysis. Images are not retained unless “Keep meal thumbnails” is enabled; then a small thumbnail is attached to the food entry. The original upload is never stored by the API.
+
+Fitbiter's coaching card lets a user request 1-to-1 coaching. Enquiries are stored in the database and can be viewed or marked contacted/closed by the account matching `COACHING_ADMIN_EMAIL` (defaults to `bhadauria.ravi8@gmail.com`). Set the same variable in Vercel if changing the administrator. The offer shown is a 3-day free coaching trial, then £50 for three months; enquiries do not take payment or guarantee a coaching slot.
 
 Anyone can create an account with an email address and password. Settings, daily records, recent foods, and photo-scan allowances are isolated by account. Passwords are scrypt-hashed, and only a digest of each 30-day session token is stored. Sign-up and sign-in are limited to 10 attempts per minute per IP. Email addresses are not verified and there is no password reset; users must remember their password. Accounts created with this password-based sign-in start with a new private log; older Google-based logs are not automatically transferred. Photo analysis is limited to three scans per UTC day per account and eight requests per minute per client IP. Gemini's Free plan has separate provider quotas which may be lower and can change; there is no paid-model fallback. Do not attach billing to the AI Studio project if you require a hard $0 provider bill. Google's Free tier may use submitted content to improve its products, so photo scans require explicit acknowledgement; avoid photos containing faces or private information.
 

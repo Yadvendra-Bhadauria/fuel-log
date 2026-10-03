@@ -84,6 +84,26 @@ CREATE TABLE IF NOT EXISTS "Workout" (
     CONSTRAINT "Workout_dayId_fkey" FOREIGN KEY ("dayId") REFERENCES "Day" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS "WorkoutPlan" (
+    "userId" TEXT NOT NULL PRIMARY KEY,
+    "days" TEXT NOT NULL DEFAULT '[]',
+    "preferences" TEXT NOT NULL DEFAULT '{}',
+    "updatedAt" DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "CoachingEnquiry" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "goal" TEXT NOT NULL,
+    "availability" TEXT NOT NULL,
+    "message" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'new',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS "PhotoScanUsage" (
     "userId" TEXT NOT NULL DEFAULT 'local',
     "date" TEXT NOT NULL,
@@ -95,3 +115,5 @@ CREATE TABLE IF NOT EXISTS "PhotoScanUsage" (
 CREATE UNIQUE INDEX IF NOT EXISTS "Day_userId_date_key" ON "Day"("userId", "date");
 CREATE INDEX IF NOT EXISTS "FoodEntry_dayId_meal_idx" ON "FoodEntry"("dayId", "meal");
 CREATE INDEX IF NOT EXISTS "Workout_dayId_idx" ON "Workout"("dayId");
+CREATE INDEX IF NOT EXISTS "CoachingEnquiry_createdAt_idx" ON "CoachingEnquiry"("createdAt");
+CREATE INDEX IF NOT EXISTS "CoachingEnquiry_status_idx" ON "CoachingEnquiry"("status");

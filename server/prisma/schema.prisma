@@ -103,6 +103,29 @@ model Workout {
   @@index([dayId])
 }
 
+model WorkoutPlan {
+  userId      String   @id
+  days        String   @default("[]")
+  preferences String   @default("{}")
+  updatedAt   DateTime @updatedAt
+}
+
+model CoachingEnquiry {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  email        String
+  goal         String
+  availability String
+  message      String
+  status       String   @default("new")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([createdAt])
+  @@index([status])
+}
+
 model PhotoScanUsage {
   userId    String   @default("local")
   date      String

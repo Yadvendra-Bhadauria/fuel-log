@@ -91,22 +91,22 @@ export default function AuthPage({ onSignIn, passwordResetEnabled }: {
   const copy = isSignup ? "Create a free account to start your personal log."
     : isSignin ? "Sign in to continue to your personal log."
       : isForgot ? "Enter your account email and we’ll send you a one-time reset link."
-        : "Choose a new password for your Fuel log account.";
+        : "Choose a new password for your Fitbiter account.";
 
   return <main className="auth-page"><div className="auth-layout">
-    <section className="auth-story" aria-label="About Fuel log">
-      <a className="brand auth-brand" href="/" aria-label="Fuel log"><span className="brand-mark">F<span>.</span></span><span>fuel<span className="brand-light">log</span></span></a>
+    <section className="auth-story" aria-label="About Fitbiter">
+      <a className="brand auth-brand" href="/" aria-label="Fitbiter"><span className="brand-mark">F<span>.</span></span><span>Fit<span className="brand-light">biter</span></span></a>
       <div className="auth-story-copy">
-        <div className="eyebrow">A LITTLE MORE BALANCE, EVERY DAY</div>
-        <h1>Feel good about the little things.</h1>
-        <p>A calmer space to notice what fuels you, celebrate movement, and build habits that feel like your own.</p>
+        <div className="eyebrow">STAY FIT. LOG YOUR BITS.</div>
+        <h1>Every little bit adds up.</h1>
+        <p>Fitbiter started with a simple idea: feeling good shouldn’t mean chasing perfection. Log the meals, movement, water, and small wins that make up your day, then watch those little bits become habits that fit your life.</p>
       </div>
       <div className="auth-feature-list">
         <div className="auth-feature"><span><Utensils size={17} /></span><div><strong>Meals, without the guesswork</strong><small>Keep food and nutrition together in one simple daily log.</small></div></div>
         <div className="auth-feature"><span><Activity size={17} /></span><div><strong>Progress that feels personal</strong><small>See your movement and daily patterns add up over time.</small></div></div>
         <div className="auth-feature"><span><Scale size={17} /></span><div><strong>Your goals, your pace</strong><small>Set a direction that fits your life, then adjust as you go.</small></div></div>
       </div>
-      <p className="auth-story-foot">Small steps add up. Keep showing up.</p>
+      <p className="auth-story-foot">Your day, your pace, your bits.</p>
     </section>
     <section className="auth-panel" aria-labelledby="auth-title">
       <span className="auth-shield"><ShieldCheck size={19} /></span>
@@ -136,7 +136,7 @@ export default function AuthPage({ onSignIn, passwordResetEnabled }: {
       {notice && <p className="auth-success" role="status">{notice}</p>}
       {isSignin && passwordResetEnabled && <button className="auth-mode-toggle" onClick={() => { setMode("forgot"); setError(""); setNotice(""); }} type="button">Forgot password?</button>}
       <p className="auth-signup-note">
-        {isForgot || isReset ? "Remembered your password?" : isSignup ? "Already have an account?" : "New to Fuel log?"}{" "}
+        {isForgot || isReset ? "Remembered your password?" : isSignup ? "Already have an account?" : "New to Fitbiter?"}{" "}
         <button className="auth-mode-toggle" onClick={() => {
           setMode(isSignup || isForgot || isReset ? "signin" : "signup");
           setError("");

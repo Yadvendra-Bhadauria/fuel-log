@@ -9,8 +9,11 @@ import { z } from "zod";
 import type { Meal, MealAnalysis, MealAnalysisItem, Settings, WeightPlanInput } from "@fuel-log/shared";
 import { createPasswordResetToken, createSessionToken, hashPassword, hashPasswordResetToken, hashSessionToken, isValidPassword, verifyPassword } from "./auth.js";
 import { buildWeightPlan } from "./calculations.js";
+import { coachingEnquirySchema, coachingEnquiryStatusSchema } from "./coaching.js";
+import { getExerciseCatalog } from "./exerciseCatalog.js";
 import { crossCheckItems, findProduct } from "./nutrition.js";
 import { FREE_MEAL_SCANS_PER_DAY, getFreeScanStatus } from "./scanQuota.js";
+import { emptyWorkoutPlan, parseWorkoutPlan, workoutPlanSchema } from "./workoutPlan.js";
 
 dotenv.config({ path: resolve(process.cwd(), "../.env") });
 dotenv.config();
@@ -29,6 +32,7 @@ const geminiApiKey = process.env.GEMINI_API_KEY?.trim() ?? "";
 const resendApiKey = process.env.RESEND_API_KEY?.trim() ?? "";
 const resendFromEmail = process.env.RESEND_FROM_EMAIL?.trim() ?? "";
 const passwordResetEnabled = Boolean(resendApiKey && resendFromEmail);
+const coachingAdminEmail = (process.env.COACHING_ADMIN_EMAIL ?? "bhadauria.ravi8@gmail.com").trim().toLowerCase();
 const GEMINI_MODEL = "gemini-2.5-flash";
 const authRequired = process.env.NODE_ENV === "production";
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -133,6 +137,13 @@ const authLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Too many account attempts. Please wait a minute and try again." },
 });
+const coachingEnquiryLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 5,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many coaching enquiries. Please wait before trying again." },
+});
 const registerSchema = z.object({
   name: z.string().trim().min(1).max(80),
   email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
@@ -167,6 +178,40 @@ const passwordResetLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: "Too many password reset attempts. Please wait before trying again." },
 });
+let workoutPlanTableInitialization: Promise<void> | undefined;
+let coachingEnquiryTableInitialization: Promise<void> | undefined;
+
+const ensureWorkoutPlanTable = async () => {
+  if (!workoutPlanTableInitialization) {
+    workoutPlanTableInitialization = prisma.$executeRaw`CREATE TABLE IF NOT EXISTS "WorkoutPlan" ("userId" TEXT NOT NULL PRIMARY KEY, "days" TEXT NOT NULL DEFAULT '[]', "preferences" TEXT NOT NULL DEFAULT '{}', "updatedAt" DATETIME NOT NULL)`
+      .then(async () => {
+        const columns = await prisma.$queryRaw<Array<{ name: string }>>`PRAGMA table_info("WorkoutPlan")`;
+        if (!columns.some((column) => column.name === "preferences")) {
+          await prisma.$executeRaw`ALTER TABLE "WorkoutPlan" ADD COLUMN "preferences" TEXT NOT NULL DEFAULT '{}'`;
+        }
+      })
+      .catch((error: unknown) => {
+        workoutPlanTableInitialization = undefined;
+        throw error;
+      });
+  }
+  await workoutPlanTableInitialization;
+};
+
+const ensureCoachingEnquiryTable = async () => {
+  if (!coachingEnquiryTableInitialization) {
+    coachingEnquiryTableInitialization = prisma.$executeRaw`CREATE TABLE IF NOT EXISTS "CoachingEnquiry" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL, "name" TEXT NOT NULL, "email" TEXT NOT NULL, "goal" TEXT NOT NULL, "availability" TEXT NOT NULL, "message" TEXT NOT NULL, "status" TEXT NOT NULL DEFAULT 'new', "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "updatedAt" DATETIME NOT NULL)`
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        coachingEnquiryTableInitialization = undefined;
+        throw error;
+      });
+  }
+  await coachingEnquiryTableInitialization;
+};
+
+const isCoachingAdmin = (request: express.Request) =>
+  (request as AuthenticatedRequest).authIdentity?.email.toLowerCase() === coachingAdminEmail;
 
 async function createAuthSession(user: { id: string; email: string; name: string }) {
   const token = createSessionToken();
@@ -364,7 +409,6 @@ const workoutSchema = z.object({
   minutes: z.number().int().min(1).max(1440),
   calories: z.number().int().min(0).max(20000),
 });
-
 const analysisSchema = z.object({
   imageBase64: z.string().min(1).max(7 * 1024 * 1024).refine((value) => {
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) return false;
@@ -433,6 +477,82 @@ app.patch("/api/settings", async (request, response, next) => {
     const input = settingsSchema.parse(request.body);
     const settings = await prisma.settings.upsert({ where: { id: settingsId }, create: { id: settingsId, ...input }, update: input });
     response.json(serializeSettings(settings));
+  } catch (error) { next(error); }
+});
+
+app.get("/api/workout-plan", async (request, response, next) => {
+  try {
+    await ensureWorkoutPlanTable();
+    const record = await prisma.workoutPlan.findUnique({ where: { userId: userIdFor(request) } });
+    response.json(record ? parseWorkoutPlan(record.days, record.preferences) : emptyWorkoutPlan());
+  } catch (error) { next(error); }
+});
+
+app.get("/api/exercises", async (_request, response) => {
+  try {
+    response.json(await getExerciseCatalog());
+  } catch (error) {
+    console.error("Exercise catalogue request failed:", error);
+    response.status(503).json({ error: "The exercise catalogue is temporarily unavailable. You can still enter exercise names manually." });
+  }
+});
+
+app.put("/api/workout-plan", async (request, response, next) => {
+  try {
+    const userId = userIdFor(request);
+    const plan = workoutPlanSchema.parse(request.body);
+    await ensureWorkoutPlanTable();
+    await prisma.workoutPlan.upsert({
+      where: { userId },
+      create: { userId, days: JSON.stringify(plan.days), preferences: JSON.stringify(plan.preferences) },
+      update: { days: JSON.stringify(plan.days), preferences: JSON.stringify(plan.preferences) },
+    });
+    response.json(plan);
+  } catch (error) { next(error); }
+});
+
+app.get("/api/coaching/admin-status", (request, response) => {
+  response.json({ isAdmin: isCoachingAdmin(request) });
+});
+
+app.post("/api/coaching/enquiries", coachingEnquiryLimiter, async (request, response, next) => {
+  try {
+    const input = coachingEnquirySchema.parse(request.body);
+    await ensureCoachingEnquiryTable();
+    const identity = (request as AuthenticatedRequest).authIdentity;
+    const enquiry = await prisma.coachingEnquiry.create({
+      data: { ...input, userId: identity?.id ?? "local" },
+      select: { id: true, status: true, createdAt: true },
+    });
+    response.status(201).json(enquiry);
+  } catch (error) { next(error); }
+});
+
+app.get("/api/coaching/enquiries", async (request, response, next) => {
+  if (!isCoachingAdmin(request)) return response.status(403).json({ error: "This inbox is only available to the Fitbiter coaching administrator." });
+  try {
+    await ensureCoachingEnquiryTable();
+    const enquiries = await prisma.coachingEnquiry.findMany({
+      select: { id: true, name: true, email: true, goal: true, availability: true, message: true, status: true, createdAt: true },
+      orderBy: { createdAt: "desc" },
+    });
+    response.json(enquiries);
+  } catch (error) { next(error); }
+});
+
+app.patch("/api/coaching/enquiries/:id", async (request, response, next) => {
+  if (!isCoachingAdmin(request)) return response.status(403).json({ error: "This inbox is only available to the Fitbiter coaching administrator." });
+  try {
+    const id = z.string().min(1).max(80).parse(request.params.id);
+    const { status } = coachingEnquiryStatusSchema.parse(request.body);
+    await ensureCoachingEnquiryTable();
+    const updated = await prisma.coachingEnquiry.updateMany({ where: { id }, data: { status } });
+    if (updated.count === 0) return response.status(404).json({ error: "That coaching enquiry no longer exists." });
+    const enquiry = await prisma.coachingEnquiry.findUniqueOrThrow({
+      where: { id },
+      select: { id: true, name: true, email: true, goal: true, availability: true, message: true, status: true, createdAt: true },
+    });
+    response.json(enquiry);
   } catch (error) { next(error); }
 });
 
