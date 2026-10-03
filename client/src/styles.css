@@ -214,12 +214,15 @@ h1, h2, h3 { font-family: "Manrope", sans-serif; }
 .scan-prompt > div { display: grid; gap: 3px; }
 .scan-prompt strong { font-size: 11px; }
 .scan-prompt > div span { color: var(--muted); font-size: 9px; }
+.photo-consent { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; color: var(--muted); cursor: pointer; font-size: 9px; line-height: 1.5; }
+.photo-consent input { width: 15px; height: 15px; flex: 0 0 auto; margin: 1px 0 0; accent-color: var(--green); }
 .scan-controls { display: flex; flex-wrap: wrap; gap: 7px; }
 .scan-controls > input:not(.visually-hidden) { min-width: 170px; min-height: 34px; flex: 1; padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--panel); color: var(--ink); font-size: 10px; }
 .scan-button { display: inline-flex; min-height: 34px; align-items: center; justify-content: center; gap: 7px; padding: 0 11px; border: 1px solid #315e4e; border-radius: 5px; background: #315e4e; color: #fff; cursor: pointer; font-size: 10px; font-weight: 700; }
 .scan-button:hover:not(:disabled) { background: #254c3d; }
 .secondary-scan { border-color: var(--line-strong); background: var(--panel); color: var(--green); }
 .secondary-scan:hover:not(:disabled) { background: var(--soft-green); }
+.scan-quota { margin: 9px 0 0; color: var(--green); font-size: 10px; font-weight: 600; line-height: 1.5; }
 .approx-note { margin: 9px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
 .visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; }
 .button-spinner, .loader { width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 700ms linear infinite; }

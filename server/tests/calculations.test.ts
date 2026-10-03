@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { scaleNutrition } from "@fuel-log/shared";
 import { buildWeightPlan, estimateCalorieTarget } from "../src/calculations.js";
+import { getFreeScanStatus } from "../src/scanQuota.js";
 
 describe("calorie target estimate", () => {
   it("uses Mifflin-St Jeor with the maintenance activity factor", () => {
@@ -59,5 +60,17 @@ describe("nutrition scaling", () => {
   it("rejects negative or non-finite portions", () => {
     expect(() => scaleNutrition(item, -1)).toThrow(RangeError);
     expect(() => scaleNutrition(item, Number.NaN)).toThrow(RangeError);
+  });
+});
+
+describe("free photo scan quota", () => {
+  it("allows at most three configured scans per UTC day", () => {
+    expect(getFreeScanStatus(0, true)).toMatchObject({ enabled: true, limit: 3, remaining: 3 });
+    expect(getFreeScanStatus(2, true)).toMatchObject({ enabled: true, remaining: 1 });
+    expect(getFreeScanStatus(3, true)).toMatchObject({ enabled: false, remaining: 0 });
+  });
+
+  it("disables scans when the free-tier provider is not configured", () => {
+    expect(getFreeScanStatus(0, false)).toMatchObject({ enabled: false, remaining: 0 });
   });
 });

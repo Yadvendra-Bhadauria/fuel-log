@@ -9,6 +9,7 @@ import GoogleLogin, { type AuthUser } from "./GoogleLogin";
 
 type Tab = "today" | "progress" | "goals";
 type ReviewItem = MealAnalysisItem & { base: MealAnalysisItem };
+type PhotoScanStatus = { configured: boolean; enabled: boolean; limit: number; used: number; remaining: number };
 const ProgressView = lazy(() => import("./ProgressView"));
 
 const mealOrder: Meal[] = ["breakfast", "lunch", "dinner", "snack"];
@@ -108,6 +109,8 @@ function App() {
   const [burned, setBurned] = useState("");
   const [scanBusy, setScanBusy] = useState(false);
   const [scanNote, setScanNote] = useState("");
+  const [scanStatus, setScanStatus] = useState<PhotoScanStatus | null>(null);
+  const [photoConsent, setPhotoConsent] = useState(() => localStorage.getItem("fuel-google-photo-consent") === "accepted");
   const [reviewPhoto, setReviewPhoto] = useState("");
   const [reviewThumbnail, setReviewThumbnail] = useState("");
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
@@ -175,11 +178,13 @@ function App() {
       api<Settings>("/api/settings"),
       api<DayRecord>(`/api/days/${date}`),
       api<FoodEntry[]>("/api/foods/recent"),
-    ]).then(([nextSettings, nextDay, nextRecent]) => {
+      api<PhotoScanStatus>("/api/meal-scans/status"),
+    ]).then(([nextSettings, nextDay, nextRecent, nextScanStatus]) => {
       if (!active) return;
       setSettings(nextSettings);
       setDay(nextDay);
       setRecent(nextRecent);
+      setScanStatus(nextScanStatus);
     }).catch((reason: unknown) => active && setError(reason instanceof Error ? reason.message : "Could not load your log."))
       .finally(() => active && setLoading(false));
     return () => { active = false; };
@@ -280,18 +285,29 @@ function App() {
 
   const scanPhoto = async (file?: File) => {
     if (!file) return;
+    if (!photoConsent) { setError("Acknowledge Google’s free-tier photo data use before scanning."); return; }
+    if (!scanStatus?.enabled) { setError(scanStatus?.configured ? "You’ve used today’s free photo scans." : "Free photo scans are not configured yet."); return; }
     setScanBusy(true); setError("");
     try {
       const prepared = await preparePhoto(file);
       setReviewPhoto(prepared.dataUrl); setReviewThumbnail(prepared.thumbnail);
       const result = await api<{ is_food: boolean; items: MealAnalysisItem[]; notes: string }>("/api/analyze-meal", {
-        method: "POST", body: JSON.stringify({ imageBase64: prepared.base64, mediaType: "image/jpeg", note: scanNote }),
+        method: "POST", body: JSON.stringify({ imageBase64: prepared.base64, mediaType: "image/jpeg", note: scanNote, consentToGoogleFreeTier: true }),
       });
       if (!result.is_food || result.items.length === 0) throw new Error("That photo does not appear to show food. Try another image.");
       setReviewItems(result.items.map((item) => ({ ...item, base: { ...item } })));
       setReviewModal(true); setReviewMeal(meal);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not analyze this photo."); }
-    finally { setScanBusy(false); setScanNote(""); if (photoInput.current) photoInput.current.value = ""; }
+    finally {
+      setScanBusy(false); setScanNote(""); if (photoInput.current) photoInput.current.value = "";
+      void api<PhotoScanStatus>("/api/meal-scans/status").then(setScanStatus).catch(() => {});
+    }
+  };
+
+  const setGooglePhotoConsent = (accepted: boolean) => {
+    setPhotoConsent(accepted);
+    if (accepted) localStorage.setItem("fuel-google-photo-consent", "accepted");
+    else localStorage.removeItem("fuel-google-photo-consent");
   };
 
   const updateReviewGrams = (index: number, grams: number) => {
@@ -407,8 +423,10 @@ function App() {
                 {recent.length > 0 && <div className="recent-foods"><span>ADD AGAIN</span>{recent.map((item) => <button key={item.id} className="recent-chip" onClick={() => addFood({ name: item.name, meal, kcal: item.kcal, grams: item.grams, proteinG: item.proteinG, carbsG: item.carbsG, fatG: item.fatG, source: item.source })}><Plus size={13} /><span>{item.name}</span><small>{number(item.kcal)} kcal</small></button>)}</div>}
 
                 <div className="scan-panel">
-                  <div className="scan-prompt"><span className="scan-icon"><Apple size={20} /></span><div><strong>Not sure of the numbers?</strong><span>Use a photo to estimate this meal.</span></div></div>
-                  <div className="scan-controls"><input aria-label="Meal note for photo estimate" maxLength={500} value={scanNote} onChange={(event) => setScanNote(event.target.value)} placeholder="Add a note (optional)" /><button className="scan-button" disabled={scanBusy} onClick={() => photoInput.current?.click()}>{scanBusy ? <span className="button-spinner" /> : <Upload size={16} />}{scanBusy ? "Analyzing" : "Scan meal"}</button><button className="scan-button secondary-scan" onClick={() => { setBarcodeModal(true); setBarcodeProduct(null); setBarcodeStatus(""); }}><Barcode size={17} /> Scan barcode</button><input ref={photoInput} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={(event) => scanPhoto(event.target.files?.[0])} /></div>
+                  <div className="scan-prompt"><span className="scan-icon"><Apple size={20} /></span><div><strong>Not sure of the numbers?</strong><span>Use one of today’s free photo estimates.</span></div></div>
+                  <label className="photo-consent"><input type="checkbox" checked={photoConsent} onChange={(event) => setGooglePhotoConsent(event.target.checked)} /><span>I understand Google’s free tier may use submitted photos to improve its products. I’ll avoid faces and private information.</span></label>
+                  <div className="scan-controls"><input aria-label="Meal note for photo estimate" maxLength={500} value={scanNote} onChange={(event) => setScanNote(event.target.value)} placeholder="Add a note (optional)" /><button className="scan-button" disabled={scanBusy || !photoConsent || !scanStatus?.enabled} title={!photoConsent ? "Acknowledge photo data use first" : !scanStatus?.enabled ? "No free photo scans available" : undefined} onClick={() => photoInput.current?.click()}>{scanBusy ? <span className="button-spinner" /> : <Upload size={16} />}{scanBusy ? "Analyzing" : "Scan meal"}</button><button className="scan-button secondary-scan" onClick={() => { setBarcodeModal(true); setBarcodeProduct(null); setBarcodeStatus(""); }}><Barcode size={17} /> Scan barcode</button><input ref={photoInput} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={(event) => scanPhoto(event.target.files?.[0])} /></div>
+                  <p className="scan-quota" role="status">{!scanStatus?.configured ? "Free photo scans are unavailable until a Gemini free-tier key is configured." : scanStatus.remaining ? `${scanStatus.remaining} of ${scanStatus.limit} free photo scans left today (UTC).` : "No free photo scans left today. The allowance resets at 00:00 UTC."}</p>
                   <p className="approx-note">Photo estimates are approximate. You review everything before it is logged.</p>
                 </div>
               </div>

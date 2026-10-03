@@ -11,7 +11,6 @@
     "db:studio": "dotenv -e ../.env -- prisma studio --schema prisma/schema.prisma"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.39.0",
     "@fuel-log/shared": "1.0.0",
     "@prisma/client": "^6.4.1",
     "cors": "^2.8.5",

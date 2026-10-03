@@ -1,6 +1,5 @@
 import dotenv from "dotenv";
 import { resolve } from "node:path";
-import Anthropic from "@anthropic-ai/sdk";
 import cors from "cors";
 import express from "express";
 import rateLimit from "express-rate-limit";
@@ -10,6 +9,7 @@ import { z } from "zod";
 import type { Meal, MealAnalysis, MealAnalysisItem, Settings, WeightPlanInput } from "@fuel-log/shared";
 import { buildWeightPlan } from "./calculations.js";
 import { crossCheckItems, findProduct } from "./nutrition.js";
+import { FREE_MEAL_SCANS_PER_DAY, getFreeScanStatus } from "./scanQuota.js";
 
 dotenv.config({ path: resolve(process.cwd(), "../.env") });
 dotenv.config();
@@ -17,7 +17,8 @@ dotenv.config();
 const prisma = new PrismaClient();
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
-const anthropic = process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
+const geminiApiKey = process.env.GEMINI_API_KEY?.trim() ?? "";
+const GEMINI_MODEL = "gemini-2.5-flash";
 const googleClientId = process.env.GOOGLE_CLIENT_ID?.trim() ?? "";
 const allowedGmail = process.env.ALLOWED_GMAIL?.trim().toLowerCase() ?? "";
 const googleAuthConfigured = Boolean(googleClientId && /^[^\s@]+@gmail\.com$/.test(allowedGmail));
@@ -32,6 +33,31 @@ class AuthError extends Error {
 
 type AuthIdentity = { email: string; name: string; picture: string | null };
 type AuthenticatedRequest = express.Request & { authIdentity?: AuthIdentity };
+
+class ScanLimitError extends Error {}
+
+const utcDateKey = () => new Date().toISOString().slice(0, 10);
+
+async function scanUsageFor(date: string) {
+  const record = await prisma.photoScanUsage.findUnique({ where: { date } });
+  const used = record?.scans ?? 0;
+  return { ...getFreeScanStatus(used, Boolean(geminiApiKey)), used };
+}
+
+async function reservePhotoScan(date: string) {
+  return prisma.$transaction(async (transaction) => {
+    await transaction.photoScanUsage.upsert({ where: { date }, create: { date, scans: 0 }, update: {} });
+    const updated = await transaction.photoScanUsage.updateMany({
+      where: { date, scans: { lt: FREE_MEAL_SCANS_PER_DAY } },
+      data: { scans: { increment: 1 } },
+    });
+    if (updated.count === 0) throw new ScanLimitError();
+  });
+}
+
+async function releasePhotoScan(date: string) {
+  await prisma.photoScanUsage.updateMany({ where: { date, scans: { gt: 0 } }, data: { scans: { decrement: 1 } } });
+}
 
 async function verifyGoogleCredential(credential: string): Promise<AuthIdentity> {
   if (!googleClientId || !allowedGmail) throw new AuthError(503, "Google sign-in is not configured.");
@@ -113,6 +139,12 @@ app.get("/api/auth/me", (request, response) => {
   response.json((request as AuthenticatedRequest).authIdentity);
 });
 
+app.get("/api/meal-scans/status", async (_request, response, next) => {
+  try {
+    response.json(await scanUsageFor(utcDateKey()));
+  } catch (error) { next(error); }
+});
+
 const mealSchema = z.enum(["breakfast", "lunch", "dinner", "snack"]);
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((value) => {
   const date = new Date(`${value}T00:00:00.000Z`);
@@ -181,6 +213,7 @@ const analysisSchema = z.object({
   }),
   mediaType: z.enum(["image/jpeg", "image/png", "image/webp", "image/gif"]),
   note: z.string().max(500).optional().default(""),
+  consentToGoogleFreeTier: z.literal(true),
 });
 const analysisResultSchema = z.object({
   is_food: z.boolean(),
@@ -193,6 +226,21 @@ const analysisResultSchema = z.object({
   total_kcal: z.number().nonnegative(),
   notes: z.string(),
 });
+const analysisResponseJsonSchema = {
+  type: "object",
+  properties: {
+    is_food: { type: "boolean" },
+    items: { type: "array", items: { type: "object", properties: {
+      name: { type: "string" }, estimated_portion: { type: "string" }, grams: { type: "number" },
+      kcal: { type: "number" }, protein_g: { type: "number" }, carbs_g: { type: "number" }, fat_g: { type: "number" },
+      confidence: { type: "string", enum: ["low", "medium", "high"] },
+    }, required: ["name", "estimated_portion", "grams", "kcal", "protein_g", "carbs_g", "fat_g", "confidence"], additionalProperties: false } },
+    total_kcal: { type: "number" },
+    notes: { type: "string" },
+  },
+  required: ["is_food", "items", "total_kcal", "notes"],
+  additionalProperties: false,
+};
 const serializeSettings = (record: Awaited<ReturnType<typeof prisma.settings.upsert>>): Settings => ({
   goalType: record.goalType as Settings["goalType"],
   calorieTarget: record.calorieTarget,
@@ -319,43 +367,54 @@ app.delete("/api/workouts/:id", async (request, response, next) => {
 const mealAnalysisLimiter = rateLimit({ windowMs: 60_000, limit: 8, standardHeaders: "draft-7", legacyHeaders: false, message: { error: "Too many scans. Please wait a minute and try again." } });
 app.post("/api/analyze-meal", mealAnalysisLimiter, async (request, response, next) => {
   try {
-    if (!anthropic) return response.status(503).json({ error: "Photo scanning is not configured yet. Add ANTHROPIC_API_KEY on the server." });
+    if (!geminiApiKey) return response.status(503).json({ error: "Free photo scans are not configured. Add GEMINI_API_KEY from Google AI Studio to the server." });
     const input = analysisSchema.parse(request.body);
     const imageSize = Buffer.byteLength(input.imageBase64, "base64");
     if (imageSize > 5 * 1024 * 1024) return response.status(413).json({ error: "The image must be 5 MB or smaller." });
     if (imageSize < 1) return response.status(400).json({ error: "The image could not be read. Please choose another." });
 
-    const result = await anthropic.messages.create({
-      model: "claude-sonnet-5-5",
-      max_tokens: 1800,
-      system: "You estimate nutrition from food photos. Identify every distinct food and estimate portions in grams using visual cues such as plate size, cutlery, and hands. Account for hidden oils, sauces, and dressings. Be honest about uncertainty. Return is_food=false when the image is not food, with an empty items array. Nutrition estimates are approximate, not medical advice.",
-      messages: [{ role: "user", content: [
-        { type: "image", source: { type: "base64", media_type: input.mediaType, data: input.imageBase64 } },
-        { type: "text", text: `Estimate this meal. User note: ${input.note || "none"}` },
-      ] }],
-      tools: [{
-        name: "report_meal",
-        description: "Return a structured estimate for all food in the image.",
-        input_schema: {
-          type: "object",
-          properties: {
-            is_food: { type: "boolean" },
-            items: { type: "array", items: { type: "object", properties: {
-              name: { type: "string" }, estimated_portion: { type: "string" }, grams: { type: "number" },
-              kcal: { type: "number" }, protein_g: { type: "number" }, carbs_g: { type: "number" }, fat_g: { type: "number" },
-              confidence: { type: "string", enum: ["low", "medium", "high"] },
-            }, required: ["name", "estimated_portion", "grams", "kcal", "protein_g", "carbs_g", "fat_g", "confidence"], additionalProperties: false } },
-            total_kcal: { type: "number" }, notes: { type: "string" },
+    const usageDate = utcDateKey();
+    try {
+      await reservePhotoScan(usageDate);
+    } catch (error) {
+      if (error instanceof ScanLimitError) return response.status(429).json({ error: "You’ve used today’s three free photo scans. More will be available after the daily reset." });
+      throw error;
+    }
+
+    let googleResponse: Response;
+    try {
+      googleResponse = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": geminiApiKey },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: "You estimate nutrition from food photos. Identify every distinct food and estimate portions in grams using visual cues such as plate size, cutlery, and hands. Account for hidden oils, sauces, and dressings. Be honest about uncertainty. Return is_food=false when the image is not food, with an empty items array. Nutrition estimates are approximate, not medical advice." }] },
+          contents: [{ role: "user", parts: [
+            { text: `Estimate this meal. User note: ${input.note || "none"}` },
+            { inlineData: { mimeType: input.mediaType, data: input.imageBase64 } },
+          ] }],
+          generationConfig: {
+            responseFormat: { text: { mimeType: "APPLICATION_JSON", schema: analysisResponseJsonSchema } },
+            maxOutputTokens: 1800,
+            temperature: 0.2,
           },
-          required: ["is_food", "items", "total_kcal", "notes"],
-          additionalProperties: false,
-        },
-      }],
-      tool_choice: { type: "tool", name: "report_meal" },
-    });
-    const toolResult = result.content.find((block) => block.type === "tool_use");
-    if (!toolResult || toolResult.type !== "tool_use") throw new Error("The meal estimate could not be read. Please try another photo.");
-    const parsed = analysisResultSchema.parse(toolResult.input) as MealAnalysis;
+        }),
+      });
+    } catch (error) {
+      await releasePhotoScan(usageDate);
+      throw error;
+    }
+
+    if (!googleResponse.ok) {
+      await releasePhotoScan(usageDate);
+      if (googleResponse.status === 429) return response.status(503).json({ error: "Google’s free scan quota is temporarily full. Try again later; this attempt did not use one of your daily scans." });
+      console.error("Gemini request failed with status", googleResponse.status);
+      return response.status(503).json({ error: "Google’s free photo scan service is temporarily unavailable. Try again later." });
+    }
+
+    const generated = await googleResponse.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const generatedText = generated.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("");
+    if (!generatedText) throw new Error("The meal estimate could not be read. Please try another photo.");
+    const parsed = analysisResultSchema.parse(JSON.parse(generatedText)) as MealAnalysis;
     const items = parsed.is_food ? await crossCheckItems(parsed.items as MealAnalysisItem[]) : [];
     const meal: MealAnalysis = { ...parsed, items, total_kcal: items.reduce((sum, item) => sum + item.kcal, 0) };
     response.json(meal);

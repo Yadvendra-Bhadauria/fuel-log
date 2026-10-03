@@ -67,3 +67,9 @@ model Workout {
 
   @@index([dayId])
 }
+
+model PhotoScanUsage {
+  date      String   @id
+  scans     Int      @default(0)
+  updatedAt DateTime @updatedAt
+}
