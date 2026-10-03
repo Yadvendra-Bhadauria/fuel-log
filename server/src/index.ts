@@ -10,6 +10,7 @@ import type { Meal, MealAnalysis, MealAnalysisItem, Settings, WeightPlanInput } 
 import { createPasswordResetToken, createSessionToken, hashPassword, hashPasswordResetToken, hashSessionToken, isValidPassword, verifyPassword } from "./auth.js";
 import { buildWeightPlan } from "./calculations.js";
 import { coachingEnquirySchema, coachingEnquiryStatusSchema } from "./coaching.js";
+import { sendCoachingEnquiryNotification } from "./coachingEmail.js";
 import { getExerciseCatalog } from "./exerciseCatalog.js";
 import { crossCheckItems, findProduct } from "./nutrition.js";
 import { FREE_MEAL_SCANS_PER_DAY, getFreeScanStatus } from "./scanQuota.js";
@@ -524,7 +525,12 @@ app.post("/api/coaching/enquiries", coachingEnquiryLimiter, async (request, resp
       data: { ...input, userId: identity?.id ?? "local" },
       select: { id: true, status: true, createdAt: true },
     });
-    response.status(201).json(enquiry);
+    const emailStatus = await sendCoachingEnquiryNotification(input, {
+      apiKey: resendApiKey,
+      from: resendFromEmail,
+      to: coachingAdminEmail,
+    });
+    response.status(201).json({ ...enquiry, emailStatus });
   } catch (error) { next(error); }
 });
 
