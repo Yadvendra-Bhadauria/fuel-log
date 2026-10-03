@@ -1,14 +1,15 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "npm install --include=dev",
   "services": {
     "client": {
       "root": "client",
-      "framework": "vite"
+      "framework": "vite",
+      "installCommand": "npm install --include=dev"
     },
     "server": {
       "root": "server",
-      "framework": "express"
+      "framework": "express",
+      "installCommand": "npm install --include=dev"
     }
   },
   "rewrites": [
