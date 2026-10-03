@@ -20,6 +20,7 @@ type CoachingEnquiry = {
   createdAt: string;
 };
 type CoachingInboxData = { accountCount: number; newAccounts30d: number; enquiries: CoachingEnquiry[] };
+type CoachingAdmin = { email: string; createdAt: string };
 
 const mealOrder: Meal[] = ["breakfast", "lunch", "dinner", "snack"];
 const mealColor: Record<Meal, string> = { breakfast: "#f6bd60", lunch: "#71b8a2", dinner: "#ed8064", snack: "#a6a4d5" };
@@ -77,7 +78,12 @@ function App() {
   const [workoutPlanSaved, setWorkoutPlanSaved] = useState(false);
   const [workoutPlanBusy, setWorkoutPlanBusy] = useState(false);
   const [isCoachingAdmin, setIsCoachingAdmin] = useState(false);
+  const [canManageCoachingAdmins, setCanManageCoachingAdmins] = useState(false);
   const [coachingEnquiries, setCoachingEnquiries] = useState<CoachingEnquiry[]>([]);
+  const [coachingAdmins, setCoachingAdmins] = useState<CoachingAdmin[]>([]);
+  const [coachingAdminEmailDraft, setCoachingAdminEmailDraft] = useState("");
+  const [coachingAdminInviteUrl, setCoachingAdminInviteUrl] = useState("");
+  const [coachingAdminBusy, setCoachingAdminBusy] = useState(false);
   const [coachingAccountCount, setCoachingAccountCount] = useState(0);
   const [coachingNewAccounts30d, setCoachingNewAccounts30d] = useState(0);
   const [coachingInboxLoading, setCoachingInboxLoading] = useState(false);
@@ -116,6 +122,8 @@ function App() {
   const [barcodeGrams, setBarcodeGrams] = useState("100");
   const [barcodeStatus, setBarcodeStatus] = useState("");
   const [goalSaved, setGoalSaved] = useState(false);
+  const adminInviteToken = new URLSearchParams(window.location.search).get("adminInvite");
+  const adminInviteAttempt = useRef<string | null>(null);
   const refreshDay = async () => {
     const data = await api<DayRecord>(`/api/days/${date}`);
     setDay(data);
@@ -170,6 +178,29 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!adminInviteToken || !authUser || authLoading || adminInviteAttempt.current === adminInviteToken) return;
+    adminInviteAttempt.current = adminInviteToken;
+    let active = true;
+    api<{ email: string }>("/api/coaching/admin-invites/accept", {
+      method: "POST",
+      body: JSON.stringify({ token: adminInviteToken }),
+    }).then(({ email }) => {
+      if (!active) return;
+      const url = new URL(window.location.href);
+      url.searchParams.delete("adminInvite");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+      setIsCoachingAdmin(true);
+      setTab("coaching-admin");
+      setSuccessMessage(`Administrator access activated for ${email}.`);
+    }).catch((reason: unknown) => {
+      if (!active) return;
+      adminInviteAttempt.current = null;
+      setError(reason instanceof Error ? reason.message : "Could not accept this administrator invitation.");
+    });
+    return () => { active = false; };
+  }, [adminInviteToken, authUser, authLoading]);
+
+  useEffect(() => {
     if (authLoading || authConfig === null || (authConfig.required && !authUser)) {
       setLoading(false);
       return;
@@ -182,7 +213,7 @@ function App() {
       api<DayRecord>(`/api/days/${date}`),
       api<FoodEntry[]>("/api/foods/recent"),
       api<WorkoutPlan>("/api/workout-plan"),
-      api<{ isAdmin: boolean }>("/api/coaching/admin-status"),
+      api<{ isAdmin: boolean; canManageAdmins: boolean }>("/api/coaching/admin-status"),
     ]).then(([nextSettings, nextDay, nextRecent, nextWorkoutPlan, adminStatus]) => {
       if (!active) return;
       setSettings(nextSettings);
@@ -190,6 +221,7 @@ function App() {
       setRecent(nextRecent);
       setWorkoutPlan(nextWorkoutPlan);
       setIsCoachingAdmin(adminStatus.isAdmin);
+      setCanManageCoachingAdmins(adminStatus.canManageAdmins);
     }).catch((reason: unknown) => active && setError(reason instanceof Error ? reason.message : "Could not load your log."))
       .finally(() => active && setLoading(false));
     return () => { active = false; };
@@ -205,17 +237,22 @@ function App() {
     if (tab !== "coaching-admin" || !isCoachingAdmin) return;
     let active = true;
     setCoachingInboxLoading(true);
-    api<CoachingInboxData>("/api/coaching/enquiries")
-      .then((data) => {
+    const requests: [Promise<CoachingInboxData>, Promise<{ admins: CoachingAdmin[] }> | null] = [
+      api<CoachingInboxData>("/api/coaching/enquiries"),
+      canManageCoachingAdmins ? api<{ admins: CoachingAdmin[] }>("/api/coaching/admins") : null,
+    ];
+    Promise.all(requests)
+      .then(([data, adminData]) => {
         if (!active) return;
         setCoachingEnquiries(data.enquiries);
         setCoachingAccountCount(data.accountCount);
         setCoachingNewAccounts30d(data.newAccounts30d);
+        if (adminData) setCoachingAdmins(adminData.admins);
       })
       .catch((reason: unknown) => active && setError(reason instanceof Error ? reason.message : "Could not load coaching enquiries."))
       .finally(() => active && setCoachingInboxLoading(false));
     return () => { active = false; };
-  }, [tab, isCoachingAdmin, coachingInboxRefresh]);
+  }, [tab, isCoachingAdmin, canManageCoachingAdmins, coachingInboxRefresh]);
 
   const foods = day?.foods ?? [];
   const workouts = day?.workouts ?? [];
@@ -422,6 +459,47 @@ function App() {
     }
   };
 
+  const addCoachingAdmin = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setCoachingAdminBusy(true);
+    try {
+      const invite = await api<{ email: string; token: string; expiresAt: string }>("/api/coaching/admins", {
+        method: "POST",
+        body: JSON.stringify({ email: coachingAdminEmailDraft }),
+      });
+      setCoachingAdminInviteUrl(`${window.location.origin}/?adminInvite=${encodeURIComponent(invite.token)}`);
+      setCoachingAdminEmailDraft("");
+      setSuccessMessage(`An admin invitation for ${invite.email} is ready to share. It expires in 7 days.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not add this admin.");
+    } finally {
+      setCoachingAdminBusy(false);
+    }
+  };
+
+  const copyCoachingAdminInvite = async () => {
+    try {
+      await navigator.clipboard.writeText(coachingAdminInviteUrl);
+      setSuccessMessage("Admin invitation link copied. Share it privately with the intended person.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not copy the invitation link. Select and copy it manually.");
+    }
+  };
+
+  const removeCoachingAdmin = async (email: string) => {
+    if (!window.confirm(`Remove trainer admin access for ${email}?`)) return;
+    setCoachingAdminBusy(true);
+    try {
+      await api<void>(`/api/coaching/admins/${encodeURIComponent(email)}`, { method: "DELETE" });
+      setCoachingAdmins((current) => current.filter((admin) => admin.email !== email));
+      setSuccessMessage(`${email} no longer has trainer admin access.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not remove this admin.");
+    } finally {
+      setCoachingAdminBusy(false);
+    }
+  };
+
   const generateWorkoutPlan = (preferences: WorkoutPlanPreferences) => {
     if (workoutPlan.days.some((planDay) => planDay.exercises.length > 0) &&
       !window.confirm("Create a new plan? This will replace the current plan draft. Save your existing plan first if you want to keep it.")) return;
@@ -563,6 +641,15 @@ function App() {
             enquiries={coachingEnquiries}
             accountCount={coachingAccountCount}
             newAccounts30d={coachingNewAccounts30d}
+            admins={coachingAdmins}
+            canManageAdmins={canManageCoachingAdmins}
+            adminEmailDraft={coachingAdminEmailDraft}
+            setAdminEmailDraft={setCoachingAdminEmailDraft}
+            adminInviteUrl={coachingAdminInviteUrl}
+            adminBusy={coachingAdminBusy}
+            onAddAdmin={addCoachingAdmin}
+            onCopyInvite={copyCoachingAdminInvite}
+            onRemoveAdmin={removeCoachingAdmin}
             loading={coachingInboxLoading}
             onRefresh={() => setCoachingInboxRefresh((value) => value + 1)}
             onStatusChange={updateCoachingEnquiry}
@@ -610,10 +697,19 @@ function FoodLog({ foods, onRemove }: { foods: FoodEntry[]; onRemove: (id: strin
   })}</div>;
 }
 
-function CoachingInbox({ enquiries, accountCount, newAccounts30d, loading, onRefresh, onStatusChange }: {
+function CoachingInbox({ enquiries, accountCount, newAccounts30d, admins, canManageAdmins, adminEmailDraft, setAdminEmailDraft, adminInviteUrl, adminBusy, onAddAdmin, onCopyInvite, onRemoveAdmin, loading, onRefresh, onStatusChange }: {
   enquiries: CoachingEnquiry[];
   accountCount: number;
   newAccounts30d: number;
+  admins: CoachingAdmin[];
+  canManageAdmins: boolean;
+  adminEmailDraft: string;
+  setAdminEmailDraft: (value: string) => void;
+  adminInviteUrl: string;
+  adminBusy: boolean;
+  onAddAdmin: (event: React.FormEvent<HTMLFormElement>) => void;
+  onCopyInvite: () => void;
+  onRemoveAdmin: (email: string) => void;
   loading: boolean;
   onRefresh: () => void;
   onStatusChange: (id: string, status: CoachingEnquiry["status"]) => void;
@@ -635,6 +731,16 @@ function CoachingInbox({ enquiries, accountCount, newAccounts30d, loading, onRef
       <article><span>TOTAL ENQUIRIES</span><strong>{number(counts.all)}</strong></article>
       <article><span>NEED A REPLY</span><strong>{number(counts.new)}</strong></article>
     </section>
+    {canManageAdmins && <section className="admin-management">
+      <div><h2>Administrator access</h2><p>Only you can manage this list. Invitees must sign in with the invited email and accept the one-time link.</p></div>
+      <form className="admin-management-form" onSubmit={onAddAdmin}>
+        <label htmlFor="new-admin-email">Invite admin by email</label>
+        <div><input id="new-admin-email" required type="email" maxLength={254} value={adminEmailDraft} onChange={(event) => setAdminEmailDraft(event.target.value)} placeholder="name@example.com" /><button className="primary-button" type="submit" disabled={adminBusy}>{adminBusy ? "Creating…" : "Create invite"}</button></div>
+      </form>
+      {adminInviteUrl && <div className="admin-invite-link"><label htmlFor="admin-invite-link">One-time invite link · expires in 7 days</label><div><input id="admin-invite-link" readOnly value={adminInviteUrl} /><button className="lookup-button" type="button" onClick={onCopyInvite}>Copy link</button></div><small>Share privately with the intended admin. Access is granted only after they sign in using the invited email and open the link.</small></div>}
+      <ul className="admin-access-list">{admins.map((admin) => <li key={admin.email}><span>{admin.email}</span><button className="plain-button" type="button" disabled={adminBusy} onClick={() => onRemoveAdmin(admin.email)}><Trash2 size={14} /> Remove</button></li>)}</ul>
+      {!admins.length && <p className="admin-access-empty">No additional admins have accepted an invitation yet.</p>}
+    </section>}
     <div className="coaching-inbox-filters" aria-label="Filter enquiries">
       {(["all", "new", "contacted", "closed"] as const).map((status) => <button key={status} className={filter === status ? "active" : ""} type="button" onClick={() => setFilter(status)}>{status === "all" ? "All" : status[0]!.toUpperCase() + status.slice(1)} <span>{counts[status]}</span></button>)}
     </div>

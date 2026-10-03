@@ -104,6 +104,21 @@ CREATE TABLE IF NOT EXISTS "CoachingEnquiry" (
     "updatedAt" DATETIME NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS "CoachingAdmin" (
+    "email" TEXT NOT NULL PRIMARY KEY,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdByEmail" TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "CoachingAdminInvite" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "email" TEXT NOT NULL,
+    "tokenHash" TEXT NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdByEmail" TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS "PhotoScanUsage" (
     "userId" TEXT NOT NULL DEFAULT 'local',
     "date" TEXT NOT NULL,
@@ -117,3 +132,6 @@ CREATE INDEX IF NOT EXISTS "FoodEntry_dayId_meal_idx" ON "FoodEntry"("dayId", "m
 CREATE INDEX IF NOT EXISTS "Workout_dayId_idx" ON "Workout"("dayId");
 CREATE INDEX IF NOT EXISTS "CoachingEnquiry_createdAt_idx" ON "CoachingEnquiry"("createdAt");
 CREATE INDEX IF NOT EXISTS "CoachingEnquiry_status_idx" ON "CoachingEnquiry"("status");
+CREATE UNIQUE INDEX IF NOT EXISTS "CoachingAdminInvite_tokenHash_key" ON "CoachingAdminInvite"("tokenHash");
+CREATE INDEX IF NOT EXISTS "CoachingAdminInvite_email_idx" ON "CoachingAdminInvite"("email");
+CREATE INDEX IF NOT EXISTS "CoachingAdminInvite_expiresAt_idx" ON "CoachingAdminInvite"("expiresAt");

@@ -181,6 +181,8 @@ const passwordResetLimiter = rateLimit({
 });
 let workoutPlanTableInitialization: Promise<void> | undefined;
 let coachingEnquiryTableInitialization: Promise<void> | undefined;
+let coachingAdminTableInitialization: Promise<void> | undefined;
+let coachingAdminInviteTableInitialization: Promise<void> | undefined;
 
 const ensureWorkoutPlanTable = async () => {
   if (!workoutPlanTableInitialization) {
@@ -211,8 +213,44 @@ const ensureCoachingEnquiryTable = async () => {
   await coachingEnquiryTableInitialization;
 };
 
-const isCoachingAdmin = (request: express.Request) =>
+const ensureCoachingAdminTable = async () => {
+  if (!coachingAdminTableInitialization) {
+    coachingAdminTableInitialization = prisma.$executeRaw`CREATE TABLE IF NOT EXISTS "CoachingAdmin" ("email" TEXT NOT NULL PRIMARY KEY, "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "createdByEmail" TEXT NOT NULL)`
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        coachingAdminTableInitialization = undefined;
+        throw error;
+      });
+  }
+  await coachingAdminTableInitialization;
+};
+
+const ensureCoachingAdminInviteTable = async () => {
+  if (!coachingAdminInviteTableInitialization) {
+    coachingAdminInviteTableInitialization = prisma.$executeRaw`CREATE TABLE IF NOT EXISTS "CoachingAdminInvite" ("id" TEXT NOT NULL PRIMARY KEY, "email" TEXT NOT NULL, "tokenHash" TEXT NOT NULL, "expiresAt" DATETIME NOT NULL, "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "createdByEmail" TEXT NOT NULL)`
+      .then(async () => {
+        await prisma.$executeRaw`CREATE UNIQUE INDEX IF NOT EXISTS "CoachingAdminInvite_tokenHash_key" ON "CoachingAdminInvite"("tokenHash")`;
+        await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "CoachingAdminInvite_email_idx" ON "CoachingAdminInvite"("email")`;
+        await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "CoachingAdminInvite_expiresAt_idx" ON "CoachingAdminInvite"("expiresAt")`;
+      })
+      .catch((error: unknown) => {
+        coachingAdminInviteTableInitialization = undefined;
+        throw error;
+      });
+  }
+  await coachingAdminInviteTableInitialization;
+};
+
+const isPrimaryCoachingAdmin = (request: express.Request) =>
   (request as AuthenticatedRequest).authIdentity?.email.toLowerCase() === coachingAdminEmail;
+
+const isCoachingAdmin = async (request: express.Request) => {
+  if (isPrimaryCoachingAdmin(request)) return true;
+  const email = (request as AuthenticatedRequest).authIdentity?.email.toLowerCase();
+  if (!email) return false;
+  await ensureCoachingAdminTable();
+  return Boolean(await prisma.coachingAdmin.findUnique({ where: { email }, select: { email: true } }));
+};
 
 async function createAuthSession(user: { id: string; email: string; name: string }) {
   const token = createSessionToken();
@@ -512,8 +550,10 @@ app.put("/api/workout-plan", async (request, response, next) => {
   } catch (error) { next(error); }
 });
 
-app.get("/api/coaching/admin-status", (request, response) => {
-  response.json({ isAdmin: isCoachingAdmin(request) });
+app.get("/api/coaching/admin-status", async (request, response, next) => {
+  try {
+    response.json({ isAdmin: await isCoachingAdmin(request), canManageAdmins: isPrimaryCoachingAdmin(request) });
+  } catch (error) { next(error); }
 });
 
 app.post("/api/coaching/enquiries", coachingEnquiryLimiter, async (request, response, next) => {
@@ -535,8 +575,8 @@ app.post("/api/coaching/enquiries", coachingEnquiryLimiter, async (request, resp
 });
 
 app.get("/api/coaching/enquiries", async (request, response, next) => {
-  if (!isCoachingAdmin(request)) return response.status(403).json({ error: "This inbox is only available to the Fitbiter coaching administrator." });
   try {
+    if (!await isCoachingAdmin(request)) return response.status(403).json({ error: "This inbox is only available to Fitbiter coaching administrators." });
     await ensureCoachingEnquiryTable();
     const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
     const [accountCount, newAccounts30d, enquiries] = await Promise.all([
@@ -552,8 +592,8 @@ app.get("/api/coaching/enquiries", async (request, response, next) => {
 });
 
 app.patch("/api/coaching/enquiries/:id", async (request, response, next) => {
-  if (!isCoachingAdmin(request)) return response.status(403).json({ error: "This inbox is only available to the Fitbiter coaching administrator." });
   try {
+    if (!await isCoachingAdmin(request)) return response.status(403).json({ error: "This inbox is only available to Fitbiter coaching administrators." });
     const id = z.string().min(1).max(80).parse(request.params.id);
     const { status } = coachingEnquiryStatusSchema.parse(request.body);
     await ensureCoachingEnquiryTable();
@@ -564,6 +604,87 @@ app.patch("/api/coaching/enquiries/:id", async (request, response, next) => {
       select: { id: true, name: true, email: true, goal: true, availability: true, message: true, status: true, createdAt: true },
     });
     response.json(enquiry);
+  } catch (error) { next(error); }
+});
+
+const coachingAdminEmailSchema = z.object({
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+}).strict();
+const coachingAdminInviteSchema = z.object({ token: z.string().min(1).max(128) }).strict();
+
+app.get("/api/coaching/admins", async (request, response, next) => {
+  if (!isPrimaryCoachingAdmin(request)) return response.status(403).json({ error: "Only the primary coaching administrator can manage admins." });
+  try {
+    await ensureCoachingAdminTable();
+    const admins = await prisma.coachingAdmin.findMany({ select: { email: true, createdAt: true }, orderBy: { email: "asc" } });
+    response.json({ admins });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/coaching/admins", async (request, response, next) => {
+  if (!isPrimaryCoachingAdmin(request)) return response.status(403).json({ error: "Only the primary coaching administrator can manage admins." });
+  try {
+    const { email } = coachingAdminEmailSchema.parse(request.body);
+    if (email === coachingAdminEmail) return response.status(409).json({ error: "That account is already the primary administrator." });
+    await ensureCoachingAdminTable();
+    if (await prisma.coachingAdmin.findUnique({ where: { email }, select: { email: true } })) {
+      return response.status(409).json({ error: "That email already has administrator access." });
+    }
+    await ensureCoachingAdminInviteTable();
+    if (await prisma.coachingAdminInvite.findFirst({ where: { email, expiresAt: { gt: new Date() } }, select: { id: true } })) {
+      return response.status(409).json({ error: "An active admin invitation already exists for that email." });
+    }
+    const token = createPasswordResetToken();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await prisma.coachingAdminInvite.create({
+      data: { email, tokenHash: hashPasswordResetToken(token), expiresAt, createdByEmail: coachingAdminEmail },
+    });
+    response.status(201).json({ email, token, expiresAt });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return response.status(409).json({ error: "That email already has administrator access." });
+    }
+    next(error);
+  }
+});
+
+app.post("/api/coaching/admin-invites/accept", async (request, response, next) => {
+  try {
+    const identity = (request as AuthenticatedRequest).authIdentity;
+    if (!identity) return response.status(401).json({ error: "Sign in with the invited email address to accept this invitation." });
+    const { token } = coachingAdminInviteSchema.parse(request.body);
+    const email = identity.email.toLowerCase();
+    if (email === coachingAdminEmail) return response.status(409).json({ error: "This account is already the primary administrator." });
+    await ensureCoachingAdminInviteTable();
+    const invitation = await prisma.coachingAdminInvite.findUnique({
+      where: { tokenHash: hashPasswordResetToken(token) },
+    });
+    if (!invitation) return response.status(404).json({ error: "This administrator invitation is invalid or has already been used." });
+    if (invitation.email !== email) return response.status(403).json({ error: "Sign in using the email address this invitation was sent to." });
+    if (invitation.expiresAt <= new Date()) {
+      await prisma.coachingAdminInvite.delete({ where: { id: invitation.id } });
+      return response.status(410).json({ error: "This administrator invitation has expired. Ask the primary admin for a new one." });
+    }
+    await ensureCoachingAdminTable();
+    await prisma.coachingAdmin.upsert({
+      where: { email },
+      create: { email, createdByEmail: invitation.createdByEmail },
+      update: {},
+    });
+    await prisma.coachingAdminInvite.delete({ where: { id: invitation.id } });
+    response.json({ email });
+  } catch (error) { next(error); }
+});
+
+app.delete("/api/coaching/admins/:email", async (request, response, next) => {
+  if (!isPrimaryCoachingAdmin(request)) return response.status(403).json({ error: "Only the primary coaching administrator can manage admins." });
+  try {
+    const { email } = coachingAdminEmailSchema.parse({ email: request.params.email });
+    if (email === coachingAdminEmail) return response.status(409).json({ error: "The primary administrator cannot be removed." });
+    await ensureCoachingAdminTable();
+    const removed = await prisma.coachingAdmin.deleteMany({ where: { email } });
+    if (removed.count === 0) return response.status(404).json({ error: "That administrator was not found." });
+    response.status(204).end();
   } catch (error) { next(error); }
 });
 

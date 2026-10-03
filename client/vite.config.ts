@@ -13,7 +13,7 @@ export default defineConfig({
       manifest: {
         name: "Fitbiter",
         short_name: "Fitbiter",
-        description: "Stay fit. Log your bits. A thoughtful daily nutrition and movement log.",
+        description: "STAY FIT. LOG YOUR BITS. A thoughtful daily nutrition and movement log.",
         theme_color: "#f4f5ef",
         background_color: "#f4f5ef",
         display: "standalone",

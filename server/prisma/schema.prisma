@@ -126,6 +126,24 @@ model CoachingEnquiry {
   @@index([status])
 }
 
+model CoachingAdmin {
+  email          String   @id
+  createdAt      DateTime @default(now())
+  createdByEmail String
+}
+
+model CoachingAdminInvite {
+  id             String   @id @default(cuid())
+  email          String
+  tokenHash      String   @unique
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+  createdByEmail String
+
+  @@index([email])
+  @@index([expiresAt])
+}
+
 model PhotoScanUsage {
   userId    String   @default("local")
   date      String
