@@ -2,7 +2,11 @@
   "name": "fuel-log",
   "private": true,
   "type": "module",
-  "workspaces": ["client", "server", "shared"],
+  "workspaces": [
+    "client",
+    "server",
+    "shared"
+  ],
   "scripts": {
     "postinstall": "npm run generate --workspace server",
     "dev": "concurrently -k \"npm:dev --workspace server\" \"npm:dev --workspace client\"",
@@ -13,5 +17,8 @@
   },
   "devDependencies": {
     "concurrently": "^9.1.2"
+  },
+  "dependencies": {
+    "prisma": "^6.19.3"
   }
 }
