@@ -2,8 +2,8 @@ import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual } fr
 
 const PASSWORD_KEY_LENGTH = 64;
 
-export function isValidPasswordPassphrase(password: string): boolean {
-  return password.trim().split(/\s+/).length >= 7;
+export function isValidPassword(password: string): boolean {
+  return password.length >= 6;
 }
 
 function derivePasswordKey(password: string, salt: Buffer): Promise<Buffer> {

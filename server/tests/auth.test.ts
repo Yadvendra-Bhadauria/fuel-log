@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createPasswordResetToken, createSessionToken, hashPassword, hashPasswordResetToken, hashSessionToken, isValidPasswordPassphrase, verifyPassword } from "../src/auth.js";
+import { createPasswordResetToken, createSessionToken, hashPassword, hashPasswordResetToken, hashSessionToken, isValidPassword, verifyPassword } from "../src/auth.js";
 
 describe("account authentication helpers", () => {
   it("hashes passwords and verifies only the matching password", async () => {
@@ -23,11 +23,11 @@ describe("account authentication helpers", () => {
     expect(hashSessionToken(first)).toBe(hashSessionToken(first));
   });
 
-  it("accepts passphrases of at least seven whitespace-separated words", () => {
-    expect(isValidPasswordPassphrase("one two three four five six")).toBe(false);
-    expect(isValidPasswordPassphrase("one two three four five six seven")).toBe(true);
-    expect(isValidPasswordPassphrase("one two three four five six seven! 123")).toBe(true);
-    expect(isValidPasswordPassphrase("       ")).toBe(false);
+  it("accepts passwords containing any six or more characters", () => {
+    expect(isValidPassword("12345")).toBe(false);
+    expect(isValidPassword("123456")).toBe(true);
+    expect(isValidPassword("password@q")).toBe(true);
+    expect(isValidPassword("      ")).toBe(true);
   });
 
   it("generates opaque password-reset tokens and stores only their digest", () => {

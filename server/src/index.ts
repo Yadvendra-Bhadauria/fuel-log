@@ -7,7 +7,7 @@ import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaLibSQL } from "@prisma/adapter-libsql";
 import { z } from "zod";
 import type { Meal, MealAnalysis, MealAnalysisItem, Settings, WeightPlanInput } from "@fuel-log/shared";
-import { createPasswordResetToken, createSessionToken, hashPassword, hashPasswordResetToken, hashSessionToken, isValidPasswordPassphrase, verifyPassword } from "./auth.js";
+import { createPasswordResetToken, createSessionToken, hashPassword, hashPasswordResetToken, hashSessionToken, isValidPassword, verifyPassword } from "./auth.js";
 import { buildWeightPlan } from "./calculations.js";
 import { crossCheckItems, findProduct } from "./nutrition.js";
 import { FREE_MEAL_SCANS_PER_DAY, getFreeScanStatus } from "./scanQuota.js";
@@ -136,8 +136,8 @@ const authLimiter = rateLimit({
 const registerSchema = z.object({
   name: z.string().trim().min(1).max(80),
   email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
-  password: z.string().min(1).max(128).refine(isValidPasswordPassphrase, {
-    message: "Choose a password with at least 7 words.",
+  password: z.string().min(1).max(128).refine(isValidPassword, {
+    message: "Password must be at least 6 characters.",
   }),
 });
 const loginSchema = z.object({
@@ -149,8 +149,8 @@ const passwordResetRequestSchema = z.object({
 });
 const passwordResetSchema = z.object({
   token: z.string().min(1).max(128),
-  password: z.string().min(1).max(128).refine(isValidPasswordPassphrase, {
-    message: "Choose a password with at least 7 words.",
+  password: z.string().min(1).max(128).refine(isValidPassword, {
+    message: "Password must be at least 6 characters.",
   }),
 });
 const passwordResetRequestLimiter = rateLimit({

@@ -27,7 +27,7 @@ A local-first nutrition and movement tracker. The React client is a responsive i
 
 2. Copy `.env.example` to `.env` and add API keys as needed. Keep `GEMINI_API_KEY`, `USDA_API_KEY`, `RESEND_API_KEY`, and `RESEND_FROM_EMAIL` in this server-side file. Vite does not expose these values to the browser.
 
-3. Accounts use an email address and password; no Google Cloud project or OAuth credentials are needed. New passwords must contain at least seven whitespace-separated words (punctuation and numbers are allowed), and are stored as scrypt hashes. Existing passwords remain usable for sign-in. Email addresses are not verified. Each account has a separate private log. Authentication is required in production; local development can run without signing in.
+3. Accounts use an email address and password; no Google Cloud project or OAuth credentials are needed. New and reset passwords must contain at least six characters (any characters are allowed), and are stored as scrypt hashes. Existing passwords remain usable for sign-in. Email addresses are not verified. Each account has a separate private log. Authentication is required in production; local development can run without signing in.
 
 4. For production, create a new, empty database on the Turso Free plan. Add `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` to `.env` and Vercel's Production environment settings, then run `npm run db:turso:init --workspace server` once. The initializer refuses non-empty databases to avoid overwriting older single-user data. The local SQLite database and its personal logs are not uploaded. Disable Turso overages to keep storage at $0.
 

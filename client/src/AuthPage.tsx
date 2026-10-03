@@ -39,8 +39,8 @@ export default function AuthPage({ onSignIn, passwordResetEnabled }: {
     setError("");
     setNotice("");
     try {
-      if ((mode === "signup" || mode === "reset") && password.trim().split(/\s+/).length < 7) {
-        throw new Error("Choose a password with at least 7 words.");
+      if ((mode === "signup" || mode === "reset") && password.length < 6) {
+        throw new Error("Password must be at least 6 characters.");
       }
       if (mode === "reset" && password !== passwordConfirmation) {
         throw new Error("The passwords do not match.");
@@ -123,12 +123,12 @@ export default function AuthPage({ onSignIn, passwordResetEnabled }: {
           <input autoComplete="email" maxLength={254} onChange={(event) => setEmail(event.target.value)} required type="email" value={email} />
         </label>}
         {!isForgot && <label>
-          <span>Password{(isSignup || isReset) && " (at least 7 words)"}</span>
-          <input autoComplete={isSignin ? "current-password" : "new-password"} maxLength={128} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
+          <span>Password{(isSignup || isReset) && " (at least 6 characters)"}</span>
+          <input autoComplete={isSignin ? "current-password" : "new-password"} maxLength={128} minLength={isSignin ? 1 : 6} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} />
         </label>}
         {isReset && <label>
           <span>Confirm new password</span>
-          <input autoComplete="new-password" maxLength={128} onChange={(event) => setPasswordConfirmation(event.target.value)} required type="password" value={passwordConfirmation} />
+          <input autoComplete="new-password" maxLength={128} minLength={6} onChange={(event) => setPasswordConfirmation(event.target.value)} required type="password" value={passwordConfirmation} />
         </label>}
         <button className="auth-submit" disabled={busy} type="submit">{busy ? "Please wait…" : isSignup ? "Create account" : isSignin ? "Sign in" : isForgot ? "Send reset link" : "Reset password"}</button>
       </form>
@@ -150,8 +150,8 @@ export default function AuthPage({ onSignIn, passwordResetEnabled }: {
         </button>
       </p>
       {isSignup || isSignin
-        ? <p className="auth-privacy">{isSignup ? "Use a password with at least 7 words. Email addresses are not verified." : "Use an email address you can remember. Email addresses are not verified."}</p>
-        : isReset && <p className="auth-privacy">Use at least 7 words. Punctuation and numbers are allowed.</p>}
+        ? <p className="auth-privacy">{isSignup ? "Use a password with at least 6 characters. Email addresses are not verified." : "Use an email address you can remember. Email addresses are not verified."}</p>
+        : isReset && <p className="auth-privacy">Use at least 6 characters. Any characters are allowed.</p>}
       <p className="auth-disclaimer">For general wellness; not a substitute for medical advice.</p>
     </section>
   </div></main>;
