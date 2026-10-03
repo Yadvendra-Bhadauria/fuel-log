@@ -19,6 +19,7 @@ type CoachingEnquiry = {
   status: "new" | "contacted" | "closed";
   createdAt: string;
 };
+type CoachingInboxData = { accountCount: number; newAccounts30d: number; enquiries: CoachingEnquiry[] };
 
 const mealOrder: Meal[] = ["breakfast", "lunch", "dinner", "snack"];
 const mealColor: Record<Meal, string> = { breakfast: "#f6bd60", lunch: "#71b8a2", dinner: "#ed8064", snack: "#a6a4d5" };
@@ -77,6 +78,10 @@ function App() {
   const [workoutPlanBusy, setWorkoutPlanBusy] = useState(false);
   const [isCoachingAdmin, setIsCoachingAdmin] = useState(false);
   const [coachingEnquiries, setCoachingEnquiries] = useState<CoachingEnquiry[]>([]);
+  const [coachingAccountCount, setCoachingAccountCount] = useState(0);
+  const [coachingNewAccounts30d, setCoachingNewAccounts30d] = useState(0);
+  const [coachingInboxLoading, setCoachingInboxLoading] = useState(false);
+  const [coachingInboxRefresh, setCoachingInboxRefresh] = useState(0);
   const [coachingModal, setCoachingModal] = useState(false);
   const [coachingSubmitting, setCoachingSubmitting] = useState(false);
   const [coachingFormError, setCoachingFormError] = useState("");
@@ -198,10 +203,19 @@ function App() {
 
   useEffect(() => {
     if (tab !== "coaching-admin" || !isCoachingAdmin) return;
-    api<CoachingEnquiry[]>("/api/coaching/enquiries")
-      .then(setCoachingEnquiries)
-      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load coaching enquiries."));
-  }, [tab, isCoachingAdmin]);
+    let active = true;
+    setCoachingInboxLoading(true);
+    api<CoachingInboxData>("/api/coaching/enquiries")
+      .then((data) => {
+        if (!active) return;
+        setCoachingEnquiries(data.enquiries);
+        setCoachingAccountCount(data.accountCount);
+        setCoachingNewAccounts30d(data.newAccounts30d);
+      })
+      .catch((reason: unknown) => active && setError(reason instanceof Error ? reason.message : "Could not load coaching enquiries."))
+      .finally(() => active && setCoachingInboxLoading(false));
+    return () => { active = false; };
+  }, [tab, isCoachingAdmin, coachingInboxRefresh]);
 
   const foods = day?.foods ?? [];
   const workouts = day?.workouts ?? [];
@@ -485,14 +499,14 @@ function App() {
                 <div className="eyebrow">A COACH IN YOUR CORNER</div>
                 <h2>One-to-one coaching, built around you.</h2>
                 <p>Start with your personal trainer: get your first 3 days of coaching free, then £50 for 3 months of 1-to-1 coaching.</p>
-                <small>No payment is taken in Fitbiter. Send an enquiry and the coaching team can discuss the offer with you.</small>
+                <small>No payment is taken in Fitbiter. Send a private message to the trainer to ask about the offer.</small>
               </div>
               <button className="primary-button coaching-cta" onClick={() => {
                 setCoachingName(authUser?.name ?? "");
                 setCoachingEmail(authUser?.email ?? "");
                 setCoachingModal(true);
                 setCoachingFormError("");
-              }}><Activity size={16} /> Start with your personal trainer</button>
+              }}><Mail size={16} /> Message your trainer</button>
             </section>
             <section className="day-heading">
               <div><div className="eyebrow">DAILY LOG <span className="eyebrow-dot" /></div><h1>{date === localToday() ? "Today, in balance." : prettyDate(date)}</h1></div>
@@ -545,14 +559,21 @@ function App() {
           {tab === "progress" && <Suspense fallback={<div className="loading-state">Loading progress</div>}><ProgressView days={progressDays} settings={settings} /></Suspense>}
           {tab === "workout-plan" && <WorkoutPlanView plan={workoutPlan} defaultFocus={defaultWorkoutFocus(settings.goalType)} onGenerate={generateWorkoutPlan} onAdd={addPlanExercise} onChange={updatePlanExercise} onRemove={removePlanExercise} onSave={saveWorkoutPlan} saved={workoutPlanSaved} saving={workoutPlanBusy} />}
           {tab === "goals" && <GoalsView settings={settings} currentWeightKg={day?.weightKg ?? null} onSave={patchSettings} saved={goalSaved} setSaved={setGoalSaved} />}
-          {tab === "coaching-admin" && isCoachingAdmin && <CoachingInbox enquiries={coachingEnquiries} onStatusChange={updateCoachingEnquiry} />}
+          {tab === "coaching-admin" && isCoachingAdmin && <CoachingInbox
+            enquiries={coachingEnquiries}
+            accountCount={coachingAccountCount}
+            newAccounts30d={coachingNewAccounts30d}
+            loading={coachingInboxLoading}
+            onRefresh={() => setCoachingInboxRefresh((value) => value + 1)}
+            onStatusChange={updateCoachingEnquiry}
+          />}
         </>}
       </main>
 
       <nav className="mobile-nav" aria-label="Main navigation">{nav.map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? "mobile-nav-item active" : "mobile-nav-item"} onClick={() => setTab(id)}><Icon size={19} /><span>{label}</span></button>)}</nav>
 
       {barcodeModal && <BarcodeDialog product={barcodeProduct} grams={barcodeGrams} setGrams={setBarcodeGrams} status={barcodeStatus} onDetected={onBarcodeDetected} onClose={() => { setBarcodeModal(false); setBarcodeProduct(null); }} onAdd={async () => { if (!barcodeProduct) return; const factor = Number(barcodeGrams) / 100; const added = await addFood({ name: barcodeProduct.name, meal, grams: Number(barcodeGrams), kcal: Math.round(barcodeProduct.kcalPer100g * factor), proteinG: Math.round(barcodeProduct.proteinPer100g * factor * 10) / 10, carbsG: Math.round(barcodeProduct.carbsPer100g * factor * 10) / 10, fatG: Math.round(barcodeProduct.fatPer100g * factor * 10) / 10, source: barcodeProduct.source }); if (added) setBarcodeModal(false); }} />}
-      {coachingModal && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setCoachingModal(false)}><section className="coaching-modal" role="dialog" aria-modal="true" aria-labelledby="coaching-title"><div className="modal-heading"><div><div className="eyebrow">YOUR FIRST STEP</div><h2 id="coaching-title">Ask about 1-to-1 coaching</h2></div><button className="icon-button" type="button" onClick={() => setCoachingModal(false)} aria-label="Close coaching enquiry"><X size={19} /></button></div><form className="coaching-form" onSubmit={submitCoachingEnquiry}><p>Your first 3 days are free, then £50 for 3 months. Tell the coach a little about what you’re looking for.</p><label>Your name<input required maxLength={80} value={coachingName} onChange={(event) => setCoachingName(event.target.value)} /></label><label>Email address<input required type="email" maxLength={254} value={coachingEmail} onChange={(event) => setCoachingEmail(event.target.value)} /></label><label>Main goal<select value={coachingGoal} onChange={(event) => setCoachingGoal(event.target.value as CoachingEnquiry["goal"])}><option value="lose-weight">Lose weight</option><option value="build-strength">Build strength</option><option value="improve-fitness">Improve fitness</option><option value="other">Other</option></select></label><label>When are you usually available?<input required maxLength={120} value={coachingAvailability} onChange={(event) => setCoachingAvailability(event.target.value)} placeholder="e.g. weekday evenings" /></label><label>Anything else the coach should know? <span>(optional)</span><textarea maxLength={1000} rows={3} value={coachingMessage} onChange={(event) => setCoachingMessage(event.target.value)} placeholder="Your experience, preferences, or questions" /></label>{coachingFormError && <p className="form-error" role="alert">{coachingFormError}</p>}<div className="coaching-form-actions"><button className="plain-button" type="button" onClick={() => setCoachingModal(false)}>Cancel</button><button className="primary-button" type="submit" disabled={coachingSubmitting}>{coachingSubmitting ? <span className="button-spinner" /> : <Mail size={15} />}{coachingSubmitting ? "Sending…" : "Send enquiry"}</button></div><small className="coaching-privacy">Your enquiry is saved securely to the Fitbiter Coach inbox. Email notifications require RESEND_API_KEY and RESEND_FROM_EMAIL. No payment is taken here.</small></form></section></div>}
+      {coachingModal && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setCoachingModal(false)}><section className="coaching-modal" role="dialog" aria-modal="true" aria-labelledby="coaching-title"><div className="modal-heading"><div><div className="eyebrow">YOUR FIRST STEP</div><h2 id="coaching-title">Message your trainer</h2></div><button className="icon-button" type="button" onClick={() => setCoachingModal(false)} aria-label="Close coaching enquiry"><X size={19} /></button></div><form className="coaching-form" onSubmit={submitCoachingEnquiry}><p>Ask the trainer about your goals, availability, or the 3-day free coaching trial. They can reply to the email address you provide.</p><label>Your name<input required maxLength={80} value={coachingName} onChange={(event) => setCoachingName(event.target.value)} /></label><label>Email address<input required type="email" maxLength={254} value={coachingEmail} onChange={(event) => setCoachingEmail(event.target.value)} /></label><label>Main goal<select value={coachingGoal} onChange={(event) => setCoachingGoal(event.target.value as CoachingEnquiry["goal"])}><option value="lose-weight">Lose weight</option><option value="build-strength">Build strength</option><option value="improve-fitness">Improve fitness</option><option value="other">Other</option></select></label><label>When are you usually available?<input required maxLength={120} value={coachingAvailability} onChange={(event) => setCoachingAvailability(event.target.value)} placeholder="e.g. weekday evenings" /></label><label>Your message<textarea required maxLength={1000} rows={4} value={coachingMessage} onChange={(event) => setCoachingMessage(event.target.value)} placeholder="Write your question or enquiry to the trainer" /></label>{coachingFormError && <p className="form-error" role="alert">{coachingFormError}</p>}<div className="coaching-form-actions"><button className="plain-button" type="button" onClick={() => setCoachingModal(false)}>Cancel</button><button className="primary-button" type="submit" disabled={coachingSubmitting}>{coachingSubmitting ? <span className="button-spinner" /> : <Mail size={15} />}{coachingSubmitting ? "Sending…" : "Send message"}</button></div><small className="coaching-privacy">Your message is saved securely to the Fitbiter Coach inbox. Email notifications require RESEND_API_KEY and RESEND_FROM_EMAIL. No payment is taken here.</small></form></section></div>}
     </div>
   );
 }
@@ -589,16 +610,39 @@ function FoodLog({ foods, onRemove }: { foods: FoodEntry[]; onRemove: (id: strin
   })}</div>;
 }
 
-function CoachingInbox({ enquiries, onStatusChange }: {
+function CoachingInbox({ enquiries, accountCount, newAccounts30d, loading, onRefresh, onStatusChange }: {
   enquiries: CoachingEnquiry[];
+  accountCount: number;
+  newAccounts30d: number;
+  loading: boolean;
+  onRefresh: () => void;
   onStatusChange: (id: string, status: CoachingEnquiry["status"]) => void;
 }) {
+  const [filter, setFilter] = useState<"all" | CoachingEnquiry["status"]>("all");
+  const counts = {
+    all: enquiries.length,
+    new: enquiries.filter((enquiry) => enquiry.status === "new").length,
+    contacted: enquiries.filter((enquiry) => enquiry.status === "contacted").length,
+    closed: enquiries.filter((enquiry) => enquiry.status === "closed").length,
+  };
+  const visibleEnquiries = filter === "all" ? enquiries : enquiries.filter((enquiry) => enquiry.status === filter);
   return <div className="page-view coaching-inbox">
     <div className="eyebrow">FITBITER COACHING</div>
-    <div className="page-title-row"><div><h1>Coaching enquiries</h1><p>Review requests for the 3-day trial and 3-month coaching offer.</p></div><span className="goals-emblem"><Mail size={23} /></span></div>
-    {!enquiries.length
-      ? <div className="empty-log"><span className="empty-log-icon"><Mail size={20} /></span><strong>No enquiries yet</strong><span>New coaching requests will appear here.</span></div>
-      : <div className="coaching-enquiry-list">{enquiries.map((enquiry) => <article className="coaching-enquiry" key={enquiry.id}>
+    <div className="page-title-row"><div><h1>Trainer inbox</h1><p>Review user messages and manage coaching enquiries.</p></div><button className="lookup-button" type="button" onClick={onRefresh} disabled={loading}>{loading ? "Refreshing…" : "Refresh inbox"}</button></div>
+    <section className="coaching-admin-stats" aria-label="App account and enquiry totals">
+      <article><span>REGISTERED ACCOUNTS</span><strong>{number(accountCount)}</strong></article>
+      <article><span>JOINED IN LAST 30 DAYS</span><strong>{number(newAccounts30d)}</strong></article>
+      <article><span>TOTAL ENQUIRIES</span><strong>{number(counts.all)}</strong></article>
+      <article><span>NEED A REPLY</span><strong>{number(counts.new)}</strong></article>
+    </section>
+    <div className="coaching-inbox-filters" aria-label="Filter enquiries">
+      {(["all", "new", "contacted", "closed"] as const).map((status) => <button key={status} className={filter === status ? "active" : ""} type="button" onClick={() => setFilter(status)}>{status === "all" ? "All" : status[0]!.toUpperCase() + status.slice(1)} <span>{counts[status]}</span></button>)}
+    </div>
+    {loading && !enquiries.length
+      ? <div className="loading-state"><span className="loader" />Loading trainer inbox</div>
+      : !visibleEnquiries.length
+        ? <div className="empty-log"><span className="empty-log-icon"><Mail size={20} /></span><strong>{filter === "all" ? "No enquiries yet" : `No ${filter} enquiries`}</strong><span>New coaching messages will appear here.</span></div>
+        : <div className="coaching-enquiry-list">{visibleEnquiries.map((enquiry) => <article className="coaching-enquiry" key={enquiry.id}>
         <div className="coaching-enquiry-heading"><div><h2>{enquiry.name}</h2><a href={`mailto:${enquiry.email}`}>{enquiry.email}</a></div><span className={`enquiry-status ${enquiry.status}`}>{enquiry.status}</span></div>
         <div className="coaching-enquiry-meta"><span>{enquiry.goal.replaceAll("-", " ")}</span><span><Clock3 size={14} /> {enquiry.availability}</span><span>{new Date(enquiry.createdAt).toLocaleString()}</span></div>
         {enquiry.message && <p className="coaching-enquiry-message">{enquiry.message}</p>}

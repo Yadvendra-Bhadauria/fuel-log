@@ -538,11 +538,16 @@ app.get("/api/coaching/enquiries", async (request, response, next) => {
   if (!isCoachingAdmin(request)) return response.status(403).json({ error: "This inbox is only available to the Fitbiter coaching administrator." });
   try {
     await ensureCoachingEnquiryTable();
-    const enquiries = await prisma.coachingEnquiry.findMany({
-      select: { id: true, name: true, email: true, goal: true, availability: true, message: true, status: true, createdAt: true },
-      orderBy: { createdAt: "desc" },
-    });
-    response.json(enquiries);
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const [accountCount, newAccounts30d, enquiries] = await Promise.all([
+      prisma.user.count(),
+      prisma.user.count({ where: { createdAt: { gte: since } } }),
+      prisma.coachingEnquiry.findMany({
+        select: { id: true, name: true, email: true, goal: true, availability: true, message: true, status: true, createdAt: true },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
+    response.json({ accountCount, newAccounts30d, enquiries });
   } catch (error) { next(error); }
 });
 
