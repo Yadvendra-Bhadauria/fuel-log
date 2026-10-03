@@ -86,6 +86,7 @@ function App() {
   const [tab, setTab] = useState<Tab>("today");
   const [date, setDate] = useState(localToday());
   const [day, setDay] = useState<DayRecord | null>(null);
+  const [weightDraft, setWeightDraft] = useState("");
   const [settings, setSettings] = useState<Settings>(emptySettings);
   const [recent, setRecent] = useState<FoodEntry[]>([]);
   const [progressDays, setProgressDays] = useState<DayRecord[]>([]);
@@ -132,6 +133,10 @@ function App() {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("fuel-theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    setWeightDraft(day?.weightKg == null ? "" : String(day.weightKg));
+  }, [date, day?.weightKg]);
 
   useEffect(() => {
     const expireSession = () => {
@@ -226,6 +231,19 @@ function App() {
       const updated = await api<DayRecord>(`/api/days/${date}`, { method: "PATCH", body: JSON.stringify(patch) });
       setDay((current) => current ? { ...current, ...updated } : current);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update this day."); }
+  };
+
+  const saveWeight = () => {
+    if (weightDraft === "") {
+      if (day?.weightKg != null) void patchDay({ weightKg: null });
+      return;
+    }
+    const weightKg = Number(weightDraft);
+    if (!Number.isFinite(weightKg) || weightKg < 20 || weightKg > 500) {
+      setError("Enter a weight between 20 and 500 kg.");
+      return;
+    }
+    if (weightKg !== day?.weightKg) void patchDay({ weightKg });
   };
 
   const addFood = async (input: {
@@ -401,7 +419,7 @@ function App() {
             </section>
 
             <section className="quick-stats">
-              <div className="quick-stat"><div className="quick-stat-icon weight-icon"><Scale size={17} /></div><div><span>WEIGHT</span><strong>{day?.weightKg ? `${day.weightKg} kg` : "Add weight"}</strong></div><input aria-label="Weight in kilograms" type="number" min="20" max="500" step="0.1" placeholder="kg" value={day?.weightKg ?? ""} onChange={(event) => patchDay({ weightKg: fieldNumber(event.target.value) })} /></div>
+              <div className="quick-stat"><div className="quick-stat-icon weight-icon"><Scale size={17} /></div><div><span>WEIGHT</span><strong>{day?.weightKg ? `${day.weightKg} kg` : "Add weight"}</strong></div><input aria-label="Weight in kilograms" type="number" min="20" max="500" step="0.1" placeholder="kg" value={weightDraft} onChange={(event) => setWeightDraft(event.target.value)} onBlur={saveWeight} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></div>
               <div className="quick-stat water-stat"><div className="quick-stat-icon water-icon"><Droplets size={17} /></div><div><span>WATER</span><strong>{day?.waterGlasses ?? 0} <small>/ 8 glasses</small></strong></div><div className="water-actions"><button className="water-step" disabled={!day?.waterGlasses} onClick={() => patchDay({ waterGlasses: Math.max(0, (day?.waterGlasses ?? 0) - 1) })} aria-label="Remove a glass">−</button><button className="water-step" onClick={() => patchDay({ waterGlasses: Math.min(100, (day?.waterGlasses ?? 0) + 1) })} aria-label="Add a glass">+</button></div></div>
             </section>
 

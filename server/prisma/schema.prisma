@@ -28,13 +28,16 @@ model Settings {
 
 model Day {
   id           String       @id @default(cuid())
-  date         String       @unique
+  userId       String       @default("local")
+  date         String
   weightKg     Float?
   waterGlasses Int          @default(0)
   foods        FoodEntry[]
   workouts     Workout[]
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
+
+  @@unique([userId, date])
 }
 
 model FoodEntry {
@@ -69,7 +72,10 @@ model Workout {
 }
 
 model PhotoScanUsage {
-  date      String   @id
+  userId    String   @default("local")
+  date      String
   scans     Int      @default(0)
   updatedAt DateTime @updatedAt
+
+  @@id([userId, date])
 }
