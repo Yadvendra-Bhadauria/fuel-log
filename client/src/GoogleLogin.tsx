@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ShieldCheck } from "lucide-react";
+import { Activity, Scale, ShieldCheck, Utensils } from "lucide-react";
 
 export interface AuthUser {
   email: string;
@@ -77,14 +77,31 @@ export default function GoogleLogin({ clientId, onSignIn }: { clientId: string |
     };
   }, [clientId]);
 
-  return <main className="auth-page"><section className="auth-panel" aria-labelledby="auth-title">
-    <a className="brand auth-brand" href="/" aria-label="Fuel log"><span className="brand-mark">F<span>.</span></span><span>fuel<span className="brand-light">log</span></span></a>
-    <span className="auth-shield"><ShieldCheck size={19} /></span>
-    <div className="eyebrow">PRIVATE TRACKER</div>
-    <h1 id="auth-title">Sign in to your log</h1>
-    <p className="auth-copy">Continue with the authorized Gmail account to view your personal nutrition and fitness data.</p>
-    {!clientId ? <div className="auth-unavailable" role="alert">Google sign-in is not configured. Set <code>GOOGLE_CLIENT_ID</code> and <code>ALLOWED_GMAIL</code> on the server.</div> : <div className="google-button-slot" ref={buttonRef} />}
-    {error && <p className="form-error" role="alert">{error}</p>}
-    <p className="auth-privacy">Only one verified Gmail address is permitted. Fuel log never asks for your Google password.</p>
-  </section></main>;
+  return <main className="auth-page"><div className="auth-layout">
+    <section className="auth-story" aria-label="About Fuel log">
+      <a className="brand auth-brand" href="/" aria-label="Fuel log"><span className="brand-mark">F<span>.</span></span><span>fuel<span className="brand-light">log</span></span></a>
+      <div className="auth-story-copy">
+        <div className="eyebrow">A LITTLE MORE BALANCE, EVERY DAY</div>
+        <h1>Feel good about the little things.</h1>
+        <p>A calmer space to notice what fuels you, celebrate movement, and build habits that feel like your own.</p>
+      </div>
+      <div className="auth-feature-list">
+        <div className="auth-feature"><span><Utensils size={17} /></span><div><strong>Meals, without the guesswork</strong><small>Keep food and nutrition together in one simple daily log.</small></div></div>
+        <div className="auth-feature"><span><Activity size={17} /></span><div><strong>Progress that feels personal</strong><small>See your movement and daily patterns add up over time.</small></div></div>
+        <div className="auth-feature"><span><Scale size={17} /></span><div><strong>Your goals, your pace</strong><small>Set a direction that fits your life, then adjust as you go.</small></div></div>
+      </div>
+      <p className="auth-story-foot">Small steps add up. Keep showing up.</p>
+    </section>
+    <section className="auth-panel" aria-labelledby="auth-title">
+      <span className="auth-shield"><ShieldCheck size={19} /></span>
+      <div className="eyebrow">YOUR PRIVATE SPACE</div>
+      <h2 id="auth-title">Make room for better habits.</h2>
+      <p className="auth-copy">Create your free account or return to your log with Google.</p>
+      {!clientId ? <div className="auth-unavailable" role="alert">Google sign-in is not configured. Set <code>GOOGLE_CLIENT_ID</code> on the server.</div> : <div className="google-button-slot" ref={buttonRef} />}
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <p className="auth-signup-note">New to Fuel log? Your private account is created when you continue. Already a member? Sign in with Google.</p>
+      <p className="auth-privacy">Only a verified Gmail address is needed. Your log belongs to you, and Fuel log never sees your Google password.</p>
+      <p className="auth-disclaimer">For general wellness; not a substitute for medical advice.</p>
+    </section>
+  </div></main>;
 }

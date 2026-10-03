@@ -28,8 +28,7 @@ const port = Number(process.env.PORT ?? 3001);
 const geminiApiKey = process.env.GEMINI_API_KEY?.trim() ?? "";
 const GEMINI_MODEL = "gemini-2.5-flash";
 const googleClientId = process.env.GOOGLE_CLIENT_ID?.trim() ?? "";
-const allowedGmail = process.env.ALLOWED_GMAIL?.trim().toLowerCase() ?? "";
-const googleAuthConfigured = Boolean(googleClientId && /^[^\s@]+@gmail\.com$/.test(allowedGmail));
+const googleAuthConfigured = Boolean(googleClientId);
 const authRequired = process.env.NODE_ENV === "production" || googleAuthConfigured;
 const googleClient = new OAuth2Client(googleClientId || undefined);
 
@@ -41,34 +40,36 @@ class AuthError extends Error {
 
 type AuthIdentity = { email: string; name: string; picture: string | null };
 type AuthenticatedRequest = express.Request & { authIdentity?: AuthIdentity };
+const userIdFor = (request: express.Request) => (request as AuthenticatedRequest).authIdentity?.email ?? "local";
+const settingsIdFor = (userId: string) => userId === "local" ? "default" : userId;
 
 class ScanLimitError extends Error {}
 
 const utcDateKey = () => new Date().toISOString().slice(0, 10);
 
-async function scanUsageFor(date: string) {
-  const record = await prisma.photoScanUsage.findUnique({ where: { date } });
+async function scanUsageFor(userId: string, date: string) {
+  const record = await prisma.photoScanUsage.findUnique({ where: { userId_date: { userId, date } } });
   const used = record?.scans ?? 0;
   return { ...getFreeScanStatus(used, Boolean(geminiApiKey)), used };
 }
 
-async function reservePhotoScan(date: string) {
+async function reservePhotoScan(userId: string, date: string) {
   return prisma.$transaction(async (transaction) => {
-    await transaction.photoScanUsage.upsert({ where: { date }, create: { date, scans: 0 }, update: {} });
+    await transaction.photoScanUsage.upsert({ where: { userId_date: { userId, date } }, create: { userId, date, scans: 0 }, update: {} });
     const updated = await transaction.photoScanUsage.updateMany({
-      where: { date, scans: { lt: FREE_MEAL_SCANS_PER_DAY } },
+      where: { userId, date, scans: { lt: FREE_MEAL_SCANS_PER_DAY } },
       data: { scans: { increment: 1 } },
     });
     if (updated.count === 0) throw new ScanLimitError();
   });
 }
 
-async function releasePhotoScan(date: string) {
-  await prisma.photoScanUsage.updateMany({ where: { date, scans: { gt: 0 } }, data: { scans: { decrement: 1 } } });
+async function releasePhotoScan(userId: string, date: string) {
+  await prisma.photoScanUsage.updateMany({ where: { userId, date, scans: { gt: 0 } }, data: { scans: { decrement: 1 } } });
 }
 
 async function verifyGoogleCredential(credential: string): Promise<AuthIdentity> {
-  if (!googleClientId || !allowedGmail) throw new AuthError(503, "Google sign-in is not configured.");
+  if (!googleClientId) throw new AuthError(503, "Google sign-in is not configured.");
   let payload;
   try {
     const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: googleClientId });
@@ -80,8 +81,8 @@ async function verifyGoogleCredential(credential: string): Promise<AuthIdentity>
   if (!payload || !email || payload.email_verified !== true) {
     throw new AuthError(401, "Use a verified Google account to continue.");
   }
-  if (!email.endsWith("@gmail.com") || email !== allowedGmail) {
-    throw new AuthError(403, "This Gmail account is not allowed to access Fuel log.");
+  if (!email.endsWith("@gmail.com")) {
+    throw new AuthError(403, "Sign up with a verified Gmail account to access Fuel log.");
   }
   return { email, name: payload.name ?? email, picture: payload.picture ?? null };
 }
@@ -115,7 +116,7 @@ app.use("/api", async (request, response, next) => {
   if (!authRequired) return next();
   if (!googleAuthConfigured) return response.status(503).json({ error: "Google sign-in is required but not configured." });
   const credential = request.header("authorization")?.match(/^Bearer (.+)$/i)?.[1];
-  if (!credential) return response.status(401).json({ error: "Sign in with the allowed Gmail account to continue." });
+  if (!credential) return response.status(401).json({ error: "Sign in with your Google account to continue." });
   try {
     (request as AuthenticatedRequest).authIdentity = await verifyGoogleCredential(credential);
     next();
@@ -140,7 +141,14 @@ app.get("/api/auth/config", (_request, response) => {
   });
 });
 
-app.post("/api/auth/google", async (request, response, next) => {
+const googleAuthLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 20,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many sign-in attempts. Please wait a minute and try again." },
+});
+app.post("/api/auth/google", googleAuthLimiter, async (request, response, next) => {
   try {
     const { credential } = z.object({ credential: z.string().min(1).max(8192) }).parse(request.body);
     response.json(await verifyGoogleCredential(credential));
@@ -154,9 +162,9 @@ app.get("/api/auth/me", (request, response) => {
   response.json((request as AuthenticatedRequest).authIdentity);
 });
 
-app.get("/api/meal-scans/status", async (_request, response, next) => {
+app.get("/api/meal-scans/status", async (request, response, next) => {
   try {
-    response.json(await scanUsageFor(utcDateKey()));
+    response.json(await scanUsageFor(userIdFor(request), utcDateKey()));
   } catch (error) { next(error); }
 });
 
@@ -275,17 +283,19 @@ const serializeSettings = (record: Awaited<ReturnType<typeof prisma.settings.ups
 
 app.get("/api/health", (_request, response) => response.json({ ok: true }));
 
-app.get("/api/settings", async (_request, response, next) => {
+app.get("/api/settings", async (request, response, next) => {
   try {
-    const settings = await prisma.settings.upsert({ where: { id: "default" }, create: {}, update: {} });
+    const settingsId = settingsIdFor(userIdFor(request));
+    const settings = await prisma.settings.upsert({ where: { id: settingsId }, create: { id: settingsId }, update: {} });
     response.json(serializeSettings(settings));
   } catch (error) { next(error); }
 });
 
 app.patch("/api/settings", async (request, response, next) => {
   try {
+    const settingsId = settingsIdFor(userIdFor(request));
     const input = settingsSchema.parse(request.body);
-    const settings = await prisma.settings.upsert({ where: { id: "default" }, create: input, update: input });
+    const settings = await prisma.settings.upsert({ where: { id: settingsId }, create: { id: settingsId, ...input }, update: input });
     response.json(serializeSettings(settings));
   } catch (error) { next(error); }
 });
@@ -302,38 +312,53 @@ app.post("/api/estimate-plan", (request, response, next) => {
 
 app.get("/api/days/:date", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const date = dateResponse(request.params.date);
-    const day = await prisma.day.upsert({ where: { date }, create: { date }, update: {} });
-    response.json(await prisma.day.findUnique({ where: { id: day.id }, include: { foods: { orderBy: { createdAt: "asc" } }, workouts: { orderBy: { createdAt: "asc" } } } }));
+    const day = await prisma.day.upsert({
+      where: { userId_date: { userId, date } },
+      create: { userId, date },
+      update: {},
+      include: { foods: { orderBy: { createdAt: "asc" } }, workouts: { orderBy: { createdAt: "asc" } } },
+    });
+    const { userId: _userId, ...publicDay } = day;
+    response.json(publicDay);
   } catch (error) { next(error); }
 });
 
 app.get("/api/days", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const from = dateSchema.parse(request.query.from);
     const to = dateSchema.parse(request.query.to);
     if (from > to || to > today()) return response.status(400).json({ error: "Choose a valid date range." });
-    const days = await prisma.day.findMany({ where: { date: { gte: from, lte: to } }, include: { foods: true, workouts: true }, orderBy: { date: "asc" } });
-    response.json(days);
+    const days = await prisma.day.findMany({ where: { userId, date: { gte: from, lte: to } }, include: { foods: true, workouts: true }, orderBy: { date: "asc" } });
+    response.json(days.map(({ userId: _userId, ...day }) => day));
   } catch (error) { next(error); }
 });
 
 app.patch("/api/days/:date", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const date = dateResponse(request.params.date);
     const input = z.object({ weightKg: z.number().min(20).max(500).nullable().optional(), waterGlasses: z.number().int().min(0).max(100).optional() }).strict().parse(request.body);
-    const day = await prisma.day.upsert({ where: { date }, create: { date, ...input }, update: input });
-    response.json(day);
+    const day = await prisma.day.upsert({
+      where: { userId_date: { userId, date } },
+      create: { userId, date, ...input },
+      update: input,
+    });
+    const { userId: _userId, ...publicDay } = day;
+    response.json(publicDay);
   } catch (error) { next(error); }
 });
 
 app.post("/api/foods", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const input = foodSchema.parse(request.body);
     const date = dateResponse(input.date);
     const { date: _date, photoThumbnail, ...food } = input;
-    const settings = await prisma.settings.findUnique({ where: { id: "default" } });
-    const day = await prisma.day.upsert({ where: { date }, create: { date }, update: {} });
+    const settings = await prisma.settings.findUnique({ where: { id: settingsIdFor(userId) } });
+    const day = await prisma.day.upsert({ where: { userId_date: { userId, date } }, create: { userId, date }, update: {} });
     const entry = await prisma.foodEntry.create({
       data: { ...food, dayId: day.id, photoThumbnail: settings?.keepPhotoThumbnails ? photoThumbnail : null },
     });
@@ -343,14 +368,15 @@ app.post("/api/foods", async (request, response, next) => {
 
 app.delete("/api/foods/:id", async (request, response, next) => {
   try {
-    await prisma.foodEntry.delete({ where: { id: request.params.id } });
+    const deleted = await prisma.foodEntry.deleteMany({ where: { id: request.params.id, day: { is: { userId: userIdFor(request) } } } });
+    if (deleted.count === 0) return response.status(404).json({ error: "That log entry no longer exists." });
     response.status(204).end();
   } catch (error) { next(error); }
 });
 
-app.get("/api/foods/recent", async (_request, response, next) => {
+app.get("/api/foods/recent", async (request, response, next) => {
   try {
-    const foods = await prisma.foodEntry.findMany({ distinct: ["name"], orderBy: { createdAt: "desc" }, take: 12 });
+    const foods = await prisma.foodEntry.findMany({ where: { day: { is: { userId: userIdFor(request) } } }, distinct: ["name"], orderBy: { createdAt: "desc" }, take: 12 });
     response.json(foods);
   } catch (error) { next(error); }
 });
@@ -365,16 +391,18 @@ app.get("/api/foods/search", async (request, response, next) => {
 
 app.post("/api/workouts", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const input = workoutSchema.parse(request.body);
     const date = dateResponse(input.date);
-    const day = await prisma.day.upsert({ where: { date }, create: { date }, update: {} });
+    const day = await prisma.day.upsert({ where: { userId_date: { userId, date } }, create: { userId, date }, update: {} });
     response.status(201).json(await prisma.workout.create({ data: { ...input, dayId: day.id } }));
   } catch (error) { next(error); }
 });
 
 app.delete("/api/workouts/:id", async (request, response, next) => {
   try {
-    await prisma.workout.delete({ where: { id: request.params.id } });
+    const deleted = await prisma.workout.deleteMany({ where: { id: request.params.id, day: { is: { userId: userIdFor(request) } } } });
+    if (deleted.count === 0) return response.status(404).json({ error: "That log entry no longer exists." });
     response.status(204).end();
   } catch (error) { next(error); }
 });
@@ -388,9 +416,10 @@ app.post("/api/analyze-meal", mealAnalysisLimiter, async (request, response, nex
     if (imageSize > 5 * 1024 * 1024) return response.status(413).json({ error: "The image must be 5 MB or smaller." });
     if (imageSize < 1) return response.status(400).json({ error: "The image could not be read. Please choose another." });
 
+    const userId = userIdFor(request);
     const usageDate = utcDateKey();
     try {
-      await reservePhotoScan(usageDate);
+      await reservePhotoScan(userId, usageDate);
     } catch (error) {
       if (error instanceof ScanLimitError) return response.status(429).json({ error: "You’ve used today’s three free photo scans. More will be available after the daily reset." });
       throw error;
@@ -415,12 +444,12 @@ app.post("/api/analyze-meal", mealAnalysisLimiter, async (request, response, nex
         }),
       });
     } catch (error) {
-      await releasePhotoScan(usageDate);
+      await releasePhotoScan(userId, usageDate);
       throw error;
     }
 
     if (!googleResponse.ok) {
-      await releasePhotoScan(usageDate);
+      await releasePhotoScan(userId, usageDate);
       if (googleResponse.status === 429) return response.status(503).json({ error: "Google’s free scan quota is temporarily full. Try again later; this attempt did not use one of your daily scans." });
       console.error("Gemini request failed with status", googleResponse.status);
       return response.status(503).json({ error: "Google’s free photo scan service is temporarily unavailable. Try again later." });

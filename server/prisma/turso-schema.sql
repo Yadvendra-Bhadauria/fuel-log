@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS "Settings" (
 
 CREATE TABLE IF NOT EXISTS "Day" (
     "id" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL DEFAULT 'local',
     "date" TEXT NOT NULL,
     "weightKg" REAL,
     "waterGlasses" INTEGER NOT NULL DEFAULT 0,
@@ -54,11 +55,13 @@ CREATE TABLE IF NOT EXISTS "Workout" (
 );
 
 CREATE TABLE IF NOT EXISTS "PhotoScanUsage" (
-    "date" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL DEFAULT 'local',
+    "date" TEXT NOT NULL,
     "scans" INTEGER NOT NULL DEFAULT 0,
-    "updatedAt" DATETIME NOT NULL
+    "updatedAt" DATETIME NOT NULL,
+    PRIMARY KEY ("userId", "date")
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS "Day_date_key" ON "Day"("date");
+CREATE UNIQUE INDEX IF NOT EXISTS "Day_userId_date_key" ON "Day"("userId", "date");
 CREATE INDEX IF NOT EXISTS "FoodEntry_dayId_meal_idx" ON "FoodEntry"("dayId", "meal");
 CREATE INDEX IF NOT EXISTS "Workout_dayId_idx" ON "Workout"("dayId");
