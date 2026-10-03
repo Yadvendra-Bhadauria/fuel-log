@@ -1,0 +1,65 @@
+# Fuel log
+
+A local-first nutrition and movement tracker. The React client is a responsive installable PWA; the Express API stores records in SQLite through Prisma. Photo estimates are reviewed before they are logged. The Goals tab can build a target-weight plan from current weight, target weight, height, age, sex, activity, and goal direction, with a starting calorie intake and approximate timeline.
+
+## Structure
+
+- `client/` — React, TypeScript, Vite, Tailwind CSS, PWA manifest, charts, and camera workflows.
+- `server/` — Express API, Anthropic image analysis, nutrition lookups, and Prisma persistence.
+- `shared/` — Shared API contracts and nutrition scaling.
+- `server/prisma/schema.prisma` — SQLite schema for settings, date-based logs, food, and workouts.
+
+## Requirements
+
+- Node.js 20 or newer and npm 10 or newer.
+- An Anthropic API key to enable photo-based meal estimates. It is optional for all other tracking.
+- A USDA API key is optional; Open Food Facts works without a key.
+- A Google OAuth web client ID and one Gmail address for authenticated production access.
+
+## Setup
+
+1. Install dependencies from the repository root:
+
+   ```sh
+   npm install
+   ```
+
+2. Copy `.env.example` to `.env` and add API keys as needed. Keep `ANTHROPIC_API_KEY`, `USDA_API_KEY`, `GOOGLE_CLIENT_ID`, and `ALLOWED_GMAIL` in this server-side file. Vite does not expose these values to the browser.
+
+3. For production, create a Google OAuth client of type **Web application** in Google Cloud Console. Add the deployed HTTPS origin (and `http://localhost:5173` for local testing) to **Authorized JavaScript origins**. Set `GOOGLE_CLIENT_ID` to that client ID and `ALLOWED_GMAIL` to the one permitted `@gmail.com` address. No Google client secret or Gmail password is used. The server verifies each Google ID token and rejects every other account. Development bypasses sign-in only when Google auth is not configured; production APIs fail closed until both values are valid.
+
+4. Create or update the local SQLite database:
+
+   ```sh
+   npm run db:push
+   ```
+
+5. Start the API and Vite development server:
+
+   ```sh
+   npm run dev
+   ```
+
+   The client is at `http://localhost:5173`; the API is at `http://localhost:3001`. On a phone, use the computer's LAN address and HTTPS if the browser requires a secure context for camera access.
+
+6. To create production bundles:
+
+   ```sh
+   npm run build
+   ```
+
+   Run the API bundle with `npm run start --workspace server`; serve the generated `client/dist/` directory from a static host configured to fall back to `index.html`.
+
+## Data and privacy
+
+The app starts with no seeded records. Set goals from the Goals tab. Log data is stored in `server/prisma/dev.db`. Meal images are resized in the browser, converted to JPEG, and stripped of metadata before analysis. Images are not retained unless “Keep meal thumbnails” is enabled; then a small thumbnail is attached to the food entry. The original upload is never stored by the API.
+
+Production access is restricted to the single verified Gmail configured in `ALLOWED_GMAIL`; the app is not a multi-user service. Photo analysis is limited to eight requests per minute per client IP.
+
+## Checks
+
+Run the calorie-estimation and nutrition-scaling unit tests with:
+
+```sh
+npm test
+```

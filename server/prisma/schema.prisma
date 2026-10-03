@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Settings {
+  id                    String  @id @default("default")
+  goalType              String?
+  calorieTarget         Int?
+  proteinTarget         Int?
+  carbsTarget            Int?
+  fatTarget              Int?
+  currentWeightKg        Float?
+  targetWeightKg        Float?
+  weeklyActiveMinutes   Int     @default(150)
+  includeExerciseCalories Boolean @default(true)
+  keepPhotoThumbnails   Boolean @default(false)
+  sex                   String?
+  age                   Int?
+  heightCm              Float?
+  activityFactor        Float?
+  updatedAt             DateTime @updatedAt
+}
+
+model Day {
+  id           String       @id @default(cuid())
+  date         String       @unique
+  weightKg     Float?
+  waterGlasses Int          @default(0)
+  foods        FoodEntry[]
+  workouts     Workout[]
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+}
+
+model FoodEntry {
+  id             String   @id @default(cuid())
+  dayId          String
+  meal           String
+  name           String
+  grams          Float?
+  kcal           Float
+  proteinG       Float?
+  carbsG         Float?
+  fatG           Float?
+  source         String   @default("manual")
+  confidence     String?
+  photoThumbnail String?
+  createdAt      DateTime @default(now())
+  day            Day      @relation(fields: [dayId], references: [id], onDelete: Cascade)
+
+  @@index([dayId, meal])
+}
+
+model Workout {
+  id        String   @id @default(cuid())
+  dayId     String
+  activity  String
+  minutes   Int
+  calories  Int
+  createdAt DateTime @default(now())
+  day       Day      @relation(fields: [dayId], references: [id], onDelete: Cascade)
+
+  @@index([dayId])
+}
