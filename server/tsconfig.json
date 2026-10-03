@@ -10,6 +10,6 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["src/**/*.ts", "../shared/src/**/*.ts"],
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "../shared/src/**/*.ts", "../index.ts"],
   "exclude": ["node_modules", "dist"]
 }
