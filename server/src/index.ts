@@ -13,6 +13,7 @@ import { coachingEnquirySchema, coachingEnquiryStatusSchema } from "./coaching.j
 import { sendCoachingEnquiryNotification } from "./coachingEmail.js";
 import { getExerciseCatalog } from "./exerciseCatalog.js";
 import { crossCheckItems, findProduct } from "./nutrition.js";
+import { sendPasswordResetEmail } from "./passwordResetEmail.js";
 import { FREE_MEAL_SCANS_PER_DAY, getFreeScanStatus } from "./scanQuota.js";
 import { emptyWorkoutPlan, parseWorkoutPlan, workoutPlanSchema } from "./workoutPlan.js";
 
@@ -309,22 +310,12 @@ app.post("/api/auth/password-reset/request", passwordResetRequestLimiter, async 
     const resetUrl = new URL("/", clientOrigin);
     resetUrl.searchParams.set("resetToken", token);
     try {
-      const emailResponse = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${resendApiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          from: resendFromEmail,
-          to: [user.email],
-          subject: "Reset your Fuel log password",
-          text: `Use this link to reset your Fuel log password. The link expires in 30 minutes and can only be used once:\n\n${resetUrl.toString()}\n\nIf you did not request this, you can ignore this email.`,
-          html: `<p>Use the link below to reset your Fuel log password. It expires in 30 minutes and can only be used once.</p><p><a href="${resetUrl.toString()}">Reset your password</a></p><p>If you did not request this, you can ignore this email.</p>`,
-        }),
+      await sendPasswordResetEmail({
+        apiKey: resendApiKey,
+        from: resendFromEmail,
+        to: user.email,
+        resetUrl: resetUrl.toString(),
       });
-      if (!emailResponse.ok) {
-        console.error("Password reset email delivery failed with status", emailResponse.status);
-        await prisma.passwordResetToken.delete({ where: { tokenHash } });
-        return response.status(503).json({ error: "Could not send the reset email. Please try again later." });
-      }
     } catch (error) {
       console.error("Password reset email delivery failed:", error);
       await prisma.passwordResetToken.delete({ where: { tokenHash } });
