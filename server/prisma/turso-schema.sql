@@ -1,3 +1,33 @@
+CREATE TABLE IF NOT EXISTS "User" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "email" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "passwordHash" TEXT NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS "Session" (
+    "tokenHash" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "Session_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS "PasswordResetToken" (
+    "tokenHash" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT "PasswordResetToken_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "User_email_key" ON "User"("email");
+CREATE INDEX IF NOT EXISTS "Session_userId_idx" ON "Session"("userId");
+CREATE INDEX IF NOT EXISTS "Session_expiresAt_idx" ON "Session"("expiresAt");
+CREATE INDEX IF NOT EXISTS "PasswordResetToken_userId_idx" ON "PasswordResetToken"("userId");
+CREATE INDEX IF NOT EXISTS "PasswordResetToken_expiresAt_idx" ON "PasswordResetToken"("expiresAt");
+
 CREATE TABLE IF NOT EXISTS "Settings" (
     "id" TEXT NOT NULL PRIMARY KEY DEFAULT 'default',
     "goalType" TEXT,
@@ -19,6 +49,7 @@ CREATE TABLE IF NOT EXISTS "Settings" (
 
 CREATE TABLE IF NOT EXISTS "Day" (
     "id" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL DEFAULT 'local',
     "date" TEXT NOT NULL,
     "weightKg" REAL,
     "waterGlasses" INTEGER NOT NULL DEFAULT 0,
@@ -53,12 +84,54 @@ CREATE TABLE IF NOT EXISTS "Workout" (
     CONSTRAINT "Workout_dayId_fkey" FOREIGN KEY ("dayId") REFERENCES "Day" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS "PhotoScanUsage" (
-    "date" TEXT NOT NULL PRIMARY KEY,
-    "scans" INTEGER NOT NULL DEFAULT 0,
+CREATE TABLE IF NOT EXISTS "WorkoutPlan" (
+    "userId" TEXT NOT NULL PRIMARY KEY,
+    "days" TEXT NOT NULL DEFAULT '[]',
+    "preferences" TEXT NOT NULL DEFAULT '{}',
     "updatedAt" DATETIME NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS "Day_date_key" ON "Day"("date");
+CREATE TABLE IF NOT EXISTS "CoachingEnquiry" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "userId" TEXT NOT NULL,
+    "name" TEXT NOT NULL,
+    "email" TEXT NOT NULL,
+    "goal" TEXT NOT NULL,
+    "availability" TEXT NOT NULL,
+    "message" TEXT NOT NULL,
+    "status" TEXT NOT NULL DEFAULT 'new',
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "CoachingAdmin" (
+    "email" TEXT NOT NULL PRIMARY KEY,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdByEmail" TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "CoachingAdminInvite" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "email" TEXT NOT NULL,
+    "tokenHash" TEXT NOT NULL,
+    "expiresAt" DATETIME NOT NULL,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdByEmail" TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS "PhotoScanUsage" (
+    "userId" TEXT NOT NULL DEFAULT 'local',
+    "date" TEXT NOT NULL,
+    "scans" INTEGER NOT NULL DEFAULT 0,
+    "updatedAt" DATETIME NOT NULL,
+    PRIMARY KEY ("userId", "date")
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "Day_userId_date_key" ON "Day"("userId", "date");
 CREATE INDEX IF NOT EXISTS "FoodEntry_dayId_meal_idx" ON "FoodEntry"("dayId", "meal");
 CREATE INDEX IF NOT EXISTS "Workout_dayId_idx" ON "Workout"("dayId");
+CREATE INDEX IF NOT EXISTS "CoachingEnquiry_createdAt_idx" ON "CoachingEnquiry"("createdAt");
+CREATE INDEX IF NOT EXISTS "CoachingEnquiry_status_idx" ON "CoachingEnquiry"("status");
+CREATE UNIQUE INDEX IF NOT EXISTS "CoachingAdminInvite_tokenHash_key" ON "CoachingAdminInvite"("tokenHash");
+CREATE INDEX IF NOT EXISTS "CoachingAdminInvite_email_idx" ON "CoachingAdminInvite"("email");
+CREATE INDEX IF NOT EXISTS "CoachingAdminInvite_expiresAt_idx" ON "CoachingAdminInvite"("expiresAt");

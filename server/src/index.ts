@@ -5,12 +5,17 @@ import express from "express";
 import rateLimit from "express-rate-limit";
 import { Prisma, PrismaClient } from "@prisma/client";
 import { PrismaLibSQL } from "@prisma/adapter-libsql";
-import { OAuth2Client } from "google-auth-library";
 import { z } from "zod";
 import type { Meal, MealAnalysis, MealAnalysisItem, Settings, WeightPlanInput } from "@fuel-log/shared";
+import { createPasswordResetToken, createSessionToken, hashPassword, hashPasswordResetToken, hashSessionToken, isValidPassword, verifyPassword } from "./auth.js";
 import { buildWeightPlan } from "./calculations.js";
+import { coachingEnquirySchema, coachingEnquiryStatusSchema } from "./coaching.js";
+import { sendCoachingEnquiryNotification } from "./coachingEmail.js";
+import { getExerciseCatalog } from "./exerciseCatalog.js";
 import { crossCheckItems, findProduct } from "./nutrition.js";
+import { sendPasswordResetEmail } from "./passwordResetEmail.js";
 import { FREE_MEAL_SCANS_PER_DAY, getFreeScanStatus } from "./scanQuota.js";
+import { emptyWorkoutPlan, parseWorkoutPlan, workoutPlanSchema } from "./workoutPlan.js";
 
 dotenv.config({ path: resolve(process.cwd(), "../.env") });
 dotenv.config();
@@ -26,64 +31,43 @@ const prisma = new PrismaClient({ adapter: prismaAdapter });
 const app = express();
 const port = Number(process.env.PORT ?? 3001);
 const geminiApiKey = process.env.GEMINI_API_KEY?.trim() ?? "";
+const resendApiKey = process.env.RESEND_API_KEY?.trim() ?? "";
+const resendFromEmail = process.env.RESEND_FROM_EMAIL?.trim() ?? "";
+const passwordResetEnabled = Boolean(resendApiKey && resendFromEmail);
+const coachingAdminEmail = (process.env.COACHING_ADMIN_EMAIL ?? "bhadauria.ravi8@gmail.com").trim().toLowerCase();
 const GEMINI_MODEL = "gemini-2.5-flash";
-const googleClientId = process.env.GOOGLE_CLIENT_ID?.trim() ?? "";
-const allowedGmail = process.env.ALLOWED_GMAIL?.trim().toLowerCase() ?? "";
-const googleAuthConfigured = Boolean(googleClientId && /^[^\s@]+@gmail\.com$/.test(allowedGmail));
-const authRequired = process.env.NODE_ENV === "production" || googleAuthConfigured;
-const googleClient = new OAuth2Client(googleClientId || undefined);
+const authRequired = process.env.NODE_ENV === "production";
+const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
+const PASSWORD_RESET_DURATION_MS = 30 * 60 * 1000;
 
-class AuthError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-  }
-}
-
-type AuthIdentity = { email: string; name: string; picture: string | null };
-type AuthenticatedRequest = express.Request & { authIdentity?: AuthIdentity };
+type AuthIdentity = { id: string; email: string; name: string; picture: string | null };
+type AuthenticatedRequest = express.Request & { authIdentity?: AuthIdentity; sessionTokenHash?: string };
+const userIdFor = (request: express.Request) => (request as AuthenticatedRequest).authIdentity?.id ?? "local";
+const settingsIdFor = (userId: string) => userId === "local" ? "default" : userId;
 
 class ScanLimitError extends Error {}
 
 const utcDateKey = () => new Date().toISOString().slice(0, 10);
 
-async function scanUsageFor(date: string) {
-  const record = await prisma.photoScanUsage.findUnique({ where: { date } });
+async function scanUsageFor(userId: string, date: string) {
+  const record = await prisma.photoScanUsage.findUnique({ where: { userId_date: { userId, date } } });
   const used = record?.scans ?? 0;
   return { ...getFreeScanStatus(used, Boolean(geminiApiKey)), used };
 }
 
-async function reservePhotoScan(date: string) {
+async function reservePhotoScan(userId: string, date: string) {
   return prisma.$transaction(async (transaction) => {
-    await transaction.photoScanUsage.upsert({ where: { date }, create: { date, scans: 0 }, update: {} });
+    await transaction.photoScanUsage.upsert({ where: { userId_date: { userId, date } }, create: { userId, date, scans: 0 }, update: {} });
     const updated = await transaction.photoScanUsage.updateMany({
-      where: { date, scans: { lt: FREE_MEAL_SCANS_PER_DAY } },
+      where: { userId, date, scans: { lt: FREE_MEAL_SCANS_PER_DAY } },
       data: { scans: { increment: 1 } },
     });
     if (updated.count === 0) throw new ScanLimitError();
   });
 }
 
-async function releasePhotoScan(date: string) {
-  await prisma.photoScanUsage.updateMany({ where: { date, scans: { gt: 0 } }, data: { scans: { decrement: 1 } } });
-}
-
-async function verifyGoogleCredential(credential: string): Promise<AuthIdentity> {
-  if (!googleClientId || !allowedGmail) throw new AuthError(503, "Google sign-in is not configured.");
-  let payload;
-  try {
-    const ticket = await googleClient.verifyIdToken({ idToken: credential, audience: googleClientId });
-    payload = ticket.getPayload();
-  } catch {
-    throw new AuthError(401, "Your Google sign-in expired. Please sign in again.");
-  }
-  const email = payload?.email?.toLowerCase();
-  if (!payload || !email || payload.email_verified !== true) {
-    throw new AuthError(401, "Use a verified Google account to continue.");
-  }
-  if (!email.endsWith("@gmail.com") || email !== allowedGmail) {
-    throw new AuthError(403, "This Gmail account is not allowed to access Fuel log.");
-  }
-  return { email, name: payload.name ?? email, picture: payload.picture ?? null };
+async function releasePhotoScan(userId: string, date: string) {
+  await prisma.photoScanUsage.updateMany({ where: { userId, date, scans: { gt: 0 } }, data: { scans: { decrement: 1 } } });
 }
 
 const clientOrigin = process.env.CLIENT_ORIGIN ?? "http://localhost:5173";
@@ -110,42 +94,267 @@ app.use(cors({ origin: (origin, callback) => {
 app.use(express.json({ limit: "7mb" }));
 
 app.use("/api", async (request, response, next) => {
-  const publicAuthPaths = ["/health", "/auth/config", "/auth/google"];
+  const publicAuthPaths = ["/health", "/auth/config", "/auth/register", "/auth/login", "/auth/password-reset/request", "/auth/password-reset/complete"];
   if (publicAuthPaths.includes(request.path)) return next();
-  if (!authRequired) return next();
-  if (!googleAuthConfigured) return response.status(503).json({ error: "Google sign-in is required but not configured." });
   const credential = request.header("authorization")?.match(/^Bearer (.+)$/i)?.[1];
-  if (!credential) return response.status(401).json({ error: "Sign in with the allowed Gmail account to continue." });
+  if (!credential) {
+    if (!authRequired) return next();
+    return response.status(401).json({ error: "Sign in to your Fuel Log account to continue." });
+  }
   try {
-    (request as AuthenticatedRequest).authIdentity = await verifyGoogleCredential(credential);
+    const tokenHash = hashSessionToken(credential);
+    const session = await prisma.session.findFirst({
+      where: { tokenHash, expiresAt: { gt: new Date() } },
+      include: { user: true },
+    });
+    if (!session) return response.status(401).json({ error: "Your session expired. Please sign in again." });
+    (request as AuthenticatedRequest).authIdentity = {
+      id: session.user.id,
+      email: session.user.email,
+      name: session.user.name,
+      picture: null,
+    };
+    (request as AuthenticatedRequest).sessionTokenHash = tokenHash;
     next();
   } catch (error) {
-    const authError = error instanceof AuthError ? error : new AuthError(401, "Your Google sign-in could not be verified.");
-    response.status(authError.status).json({ error: authError.message });
+    next(error);
   }
 });
 
 app.use("/api", (request, response, next) => {
-  const publicAuthPaths = ["/health", "/auth/config", "/auth/google"];
+  const publicAuthPaths = ["/health", "/auth/config"];
   if (publicAuthPaths.includes(request.path) || process.env.VERCEL !== "1") return next();
-  if (!tursoUrl || !tursoToken) return response.status(503).json({ error: "The production database is not configured yet." });
+  if (!tursoUrl || !tursoToken) return response.status(503).json({ error: "The production database is not configured yet. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in the deployment environment." });
   next();
 });
 
 app.get("/api/auth/config", (_request, response) => {
-  response.json({
-    required: authRequired,
-    configured: googleAuthConfigured,
-    clientId: googleClientId || null,
-  });
+  response.json({ required: authRequired, passwordResetEnabled });
 });
 
-app.post("/api/auth/google", async (request, response, next) => {
+const authLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many account attempts. Please wait a minute and try again." },
+});
+const coachingEnquiryLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 5,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many coaching enquiries. Please wait before trying again." },
+});
+const registerSchema = z.object({
+  name: z.string().trim().min(1).max(80),
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+  password: z.string().min(1).max(128).refine(isValidPassword, {
+    message: "Password must be at least 6 characters.",
+  }),
+});
+const loginSchema = z.object({
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+  password: z.string().min(1).max(128),
+});
+const passwordResetRequestSchema = z.object({
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+});
+const passwordResetSchema = z.object({
+  token: z.string().min(1).max(128),
+  password: z.string().min(1).max(128).refine(isValidPassword, {
+    message: "Password must be at least 6 characters.",
+  }),
+});
+const passwordResetRequestLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 5,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many reset requests. Please wait before trying again." },
+});
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60_000,
+  limit: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { error: "Too many password reset attempts. Please wait before trying again." },
+});
+let workoutPlanTableInitialization: Promise<void> | undefined;
+let coachingEnquiryTableInitialization: Promise<void> | undefined;
+let coachingAdminTableInitialization: Promise<void> | undefined;
+let coachingAdminInviteTableInitialization: Promise<void> | undefined;
+
+const ensureWorkoutPlanTable = async () => {
+  if (!workoutPlanTableInitialization) {
+    workoutPlanTableInitialization = prisma.$executeRaw`CREATE TABLE IF NOT EXISTS "WorkoutPlan" ("userId" TEXT NOT NULL PRIMARY KEY, "days" TEXT NOT NULL DEFAULT '[]', "preferences" TEXT NOT NULL DEFAULT '{}', "updatedAt" DATETIME NOT NULL)`
+      .then(async () => {
+        const columns = await prisma.$queryRaw<Array<{ name: string }>>`PRAGMA table_info("WorkoutPlan")`;
+        if (!columns.some((column) => column.name === "preferences")) {
+          await prisma.$executeRaw`ALTER TABLE "WorkoutPlan" ADD COLUMN "preferences" TEXT NOT NULL DEFAULT '{}'`;
+        }
+      })
+      .catch((error: unknown) => {
+        workoutPlanTableInitialization = undefined;
+        throw error;
+      });
+  }
+  await workoutPlanTableInitialization;
+};
+
+const ensureCoachingEnquiryTable = async () => {
+  if (!coachingEnquiryTableInitialization) {
+    coachingEnquiryTableInitialization = prisma.$executeRaw`CREATE TABLE IF NOT EXISTS "CoachingEnquiry" ("id" TEXT NOT NULL PRIMARY KEY, "userId" TEXT NOT NULL, "name" TEXT NOT NULL, "email" TEXT NOT NULL, "goal" TEXT NOT NULL, "availability" TEXT NOT NULL, "message" TEXT NOT NULL, "status" TEXT NOT NULL DEFAULT 'new', "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "updatedAt" DATETIME NOT NULL)`
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        coachingEnquiryTableInitialization = undefined;
+        throw error;
+      });
+  }
+  await coachingEnquiryTableInitialization;
+};
+
+const ensureCoachingAdminTable = async () => {
+  if (!coachingAdminTableInitialization) {
+    coachingAdminTableInitialization = prisma.$executeRaw`CREATE TABLE IF NOT EXISTS "CoachingAdmin" ("email" TEXT NOT NULL PRIMARY KEY, "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "createdByEmail" TEXT NOT NULL)`
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        coachingAdminTableInitialization = undefined;
+        throw error;
+      });
+  }
+  await coachingAdminTableInitialization;
+};
+
+const ensureCoachingAdminInviteTable = async () => {
+  if (!coachingAdminInviteTableInitialization) {
+    coachingAdminInviteTableInitialization = prisma.$executeRaw`CREATE TABLE IF NOT EXISTS "CoachingAdminInvite" ("id" TEXT NOT NULL PRIMARY KEY, "email" TEXT NOT NULL, "tokenHash" TEXT NOT NULL, "expiresAt" DATETIME NOT NULL, "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "createdByEmail" TEXT NOT NULL)`
+      .then(async () => {
+        await prisma.$executeRaw`CREATE UNIQUE INDEX IF NOT EXISTS "CoachingAdminInvite_tokenHash_key" ON "CoachingAdminInvite"("tokenHash")`;
+        await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "CoachingAdminInvite_email_idx" ON "CoachingAdminInvite"("email")`;
+        await prisma.$executeRaw`CREATE INDEX IF NOT EXISTS "CoachingAdminInvite_expiresAt_idx" ON "CoachingAdminInvite"("expiresAt")`;
+      })
+      .catch((error: unknown) => {
+        coachingAdminInviteTableInitialization = undefined;
+        throw error;
+      });
+  }
+  await coachingAdminInviteTableInitialization;
+};
+
+const isPrimaryCoachingAdmin = (request: express.Request) =>
+  (request as AuthenticatedRequest).authIdentity?.email.toLowerCase() === coachingAdminEmail;
+
+const isCoachingAdmin = async (request: express.Request) => {
+  if (isPrimaryCoachingAdmin(request)) return true;
+  const email = (request as AuthenticatedRequest).authIdentity?.email.toLowerCase();
+  if (!email) return false;
+  await ensureCoachingAdminTable();
+  return Boolean(await prisma.coachingAdmin.findUnique({ where: { email }, select: { email: true } }));
+};
+
+async function createAuthSession(user: { id: string; email: string; name: string }) {
+  const token = createSessionToken();
+  await prisma.session.create({
+    data: {
+      tokenHash: hashSessionToken(token),
+      userId: user.id,
+      expiresAt: new Date(Date.now() + SESSION_DURATION_MS),
+    },
+  });
+  return { token, user: { id: user.id, email: user.email, name: user.name, picture: null } };
+}
+
+app.post("/api/auth/register", authLimiter, async (request, response, next) => {
   try {
-    const { credential } = z.object({ credential: z.string().min(1).max(8192) }).parse(request.body);
-    response.json(await verifyGoogleCredential(credential));
+    const { name, email, password } = registerSchema.parse(request.body);
+    const user = await prisma.user.create({
+      data: { name, email, passwordHash: await hashPassword(password) },
+    });
+    response.status(201).json(await createAuthSession(user));
   } catch (error) {
-    if (error instanceof AuthError) return response.status(error.status).json({ error: error.message });
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return response.status(409).json({ error: "An account with this email already exists. Sign in instead." });
+    }
+    next(error);
+  }
+});
+
+app.post("/api/auth/login", authLimiter, async (request, response, next) => {
+  try {
+    const { email, password } = loginSchema.parse(request.body);
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user || !await verifyPassword(password, user.passwordHash)) {
+      return response.status(401).json({ error: "Email or password is incorrect." });
+    }
+    response.json(await createAuthSession(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/password-reset/request", passwordResetRequestLimiter, async (request, response, next) => {
+  try {
+    if (!passwordResetEnabled) return response.status(503).json({ error: "Password reset email is not configured yet." });
+    const { email } = passwordResetRequestSchema.parse(request.body);
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) return response.status(202).json({ message: "If an account exists for that email, a reset link will be sent." });
+
+    const token = createPasswordResetToken();
+    const tokenHash = hashPasswordResetToken(token);
+    await prisma.passwordResetToken.deleteMany({ where: { userId: user.id } });
+    await prisma.passwordResetToken.create({
+      data: { tokenHash, userId: user.id, expiresAt: new Date(Date.now() + PASSWORD_RESET_DURATION_MS) },
+    });
+
+    const resetUrl = new URL("/", clientOrigin);
+    resetUrl.searchParams.set("resetToken", token);
+    try {
+      await sendPasswordResetEmail({
+        apiKey: resendApiKey,
+        from: resendFromEmail,
+        to: user.email,
+        resetUrl: resetUrl.toString(),
+      });
+    } catch (error) {
+      console.error("Password reset email delivery failed:", error);
+      await prisma.passwordResetToken.delete({ where: { tokenHash } });
+      return response.status(503).json({ error: "Could not send the reset email. Please try again later." });
+    }
+
+    response.status(202).json({ message: "If an account exists for that email, a reset link will be sent." });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/auth/password-reset/complete", passwordResetLimiter, async (request, response, next) => {
+  try {
+    const { token, password } = passwordResetSchema.parse(request.body);
+    const tokenHash = hashPasswordResetToken(token);
+    const passwordHash = await hashPassword(password);
+    const now = new Date();
+
+    const reset = await prisma.$transaction(async (transaction) => {
+      const resetToken = await transaction.passwordResetToken.findFirst({
+        where: { tokenHash, expiresAt: { gt: now } },
+      });
+      if (!resetToken) return false;
+
+      const consumed = await transaction.passwordResetToken.deleteMany({
+        where: { tokenHash, expiresAt: { gt: now } },
+      });
+      if (consumed.count !== 1) return false;
+
+      await transaction.user.update({ where: { id: resetToken.userId }, data: { passwordHash } });
+      await transaction.passwordResetToken.deleteMany({ where: { userId: resetToken.userId } });
+      await transaction.session.deleteMany({ where: { userId: resetToken.userId } });
+      return true;
+    });
+
+    if (!reset) return response.status(400).json({ error: "This password reset link is invalid or expired. Request a new one." });
+    response.json({ message: "Your password has been reset. Sign in with your new password." });
+  } catch (error) {
     next(error);
   }
 });
@@ -154,9 +363,19 @@ app.get("/api/auth/me", (request, response) => {
   response.json((request as AuthenticatedRequest).authIdentity);
 });
 
-app.get("/api/meal-scans/status", async (_request, response, next) => {
+app.post("/api/auth/logout", async (request, response, next) => {
   try {
-    response.json(await scanUsageFor(utcDateKey()));
+    const tokenHash = (request as AuthenticatedRequest).sessionTokenHash;
+    if (tokenHash) await prisma.session.delete({ where: { tokenHash } });
+    response.status(204).end();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/meal-scans/status", async (request, response, next) => {
+  try {
+    response.json(await scanUsageFor(userIdFor(request), utcDateKey()));
   } catch (error) { next(error); }
 });
 
@@ -220,7 +439,6 @@ const workoutSchema = z.object({
   minutes: z.number().int().min(1).max(1440),
   calories: z.number().int().min(0).max(20000),
 });
-
 const analysisSchema = z.object({
   imageBase64: z.string().min(1).max(7 * 1024 * 1024).refine((value) => {
     if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) return false;
@@ -275,18 +493,189 @@ const serializeSettings = (record: Awaited<ReturnType<typeof prisma.settings.ups
 
 app.get("/api/health", (_request, response) => response.json({ ok: true }));
 
-app.get("/api/settings", async (_request, response, next) => {
+app.get("/api/settings", async (request, response, next) => {
   try {
-    const settings = await prisma.settings.upsert({ where: { id: "default" }, create: {}, update: {} });
+    const settingsId = settingsIdFor(userIdFor(request));
+    const settings = await prisma.settings.upsert({ where: { id: settingsId }, create: { id: settingsId }, update: {} });
     response.json(serializeSettings(settings));
   } catch (error) { next(error); }
 });
 
 app.patch("/api/settings", async (request, response, next) => {
   try {
+    const settingsId = settingsIdFor(userIdFor(request));
     const input = settingsSchema.parse(request.body);
-    const settings = await prisma.settings.upsert({ where: { id: "default" }, create: input, update: input });
+    const settings = await prisma.settings.upsert({ where: { id: settingsId }, create: { id: settingsId, ...input }, update: input });
     response.json(serializeSettings(settings));
+  } catch (error) { next(error); }
+});
+
+app.get("/api/workout-plan", async (request, response, next) => {
+  try {
+    await ensureWorkoutPlanTable();
+    const record = await prisma.workoutPlan.findUnique({ where: { userId: userIdFor(request) } });
+    response.json(record ? parseWorkoutPlan(record.days, record.preferences) : emptyWorkoutPlan());
+  } catch (error) { next(error); }
+});
+
+app.get("/api/exercises", async (_request, response) => {
+  try {
+    response.json(await getExerciseCatalog());
+  } catch (error) {
+    console.error("Exercise catalogue request failed:", error);
+    response.status(503).json({ error: "The exercise catalogue is temporarily unavailable. You can still enter exercise names manually." });
+  }
+});
+
+app.put("/api/workout-plan", async (request, response, next) => {
+  try {
+    const userId = userIdFor(request);
+    const plan = workoutPlanSchema.parse(request.body);
+    await ensureWorkoutPlanTable();
+    await prisma.workoutPlan.upsert({
+      where: { userId },
+      create: { userId, days: JSON.stringify(plan.days), preferences: JSON.stringify(plan.preferences) },
+      update: { days: JSON.stringify(plan.days), preferences: JSON.stringify(plan.preferences) },
+    });
+    response.json(plan);
+  } catch (error) { next(error); }
+});
+
+app.get("/api/coaching/admin-status", async (request, response, next) => {
+  try {
+    response.json({ isAdmin: await isCoachingAdmin(request), canManageAdmins: isPrimaryCoachingAdmin(request) });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/coaching/enquiries", coachingEnquiryLimiter, async (request, response, next) => {
+  try {
+    const input = coachingEnquirySchema.parse(request.body);
+    await ensureCoachingEnquiryTable();
+    const identity = (request as AuthenticatedRequest).authIdentity;
+    const enquiry = await prisma.coachingEnquiry.create({
+      data: { ...input, userId: identity?.id ?? "local" },
+      select: { id: true, status: true, createdAt: true },
+    });
+    const emailStatus = await sendCoachingEnquiryNotification(input, {
+      apiKey: resendApiKey,
+      from: resendFromEmail,
+      to: coachingAdminEmail,
+    });
+    response.status(201).json({ ...enquiry, emailStatus });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/coaching/enquiries", async (request, response, next) => {
+  try {
+    if (!await isCoachingAdmin(request)) return response.status(403).json({ error: "This inbox is only available to Fitbiter coaching administrators." });
+    await ensureCoachingEnquiryTable();
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const [accountCount, newAccounts30d, enquiries] = await Promise.all([
+      prisma.user.count(),
+      prisma.user.count({ where: { createdAt: { gte: since } } }),
+      prisma.coachingEnquiry.findMany({
+        select: { id: true, name: true, email: true, goal: true, availability: true, message: true, status: true, createdAt: true },
+        orderBy: { createdAt: "desc" },
+      }),
+    ]);
+    response.json({ accountCount, newAccounts30d, enquiries });
+  } catch (error) { next(error); }
+});
+
+app.patch("/api/coaching/enquiries/:id", async (request, response, next) => {
+  try {
+    if (!await isCoachingAdmin(request)) return response.status(403).json({ error: "This inbox is only available to Fitbiter coaching administrators." });
+    const id = z.string().min(1).max(80).parse(request.params.id);
+    const { status } = coachingEnquiryStatusSchema.parse(request.body);
+    await ensureCoachingEnquiryTable();
+    const updated = await prisma.coachingEnquiry.updateMany({ where: { id }, data: { status } });
+    if (updated.count === 0) return response.status(404).json({ error: "That coaching enquiry no longer exists." });
+    const enquiry = await prisma.coachingEnquiry.findUniqueOrThrow({
+      where: { id },
+      select: { id: true, name: true, email: true, goal: true, availability: true, message: true, status: true, createdAt: true },
+    });
+    response.json(enquiry);
+  } catch (error) { next(error); }
+});
+
+const coachingAdminEmailSchema = z.object({
+  email: z.string().trim().email().max(254).transform((email) => email.toLowerCase()),
+}).strict();
+const coachingAdminInviteSchema = z.object({ token: z.string().min(1).max(128) }).strict();
+
+app.get("/api/coaching/admins", async (request, response, next) => {
+  if (!isPrimaryCoachingAdmin(request)) return response.status(403).json({ error: "Only the primary coaching administrator can manage admins." });
+  try {
+    await ensureCoachingAdminTable();
+    const admins = await prisma.coachingAdmin.findMany({ select: { email: true, createdAt: true }, orderBy: { email: "asc" } });
+    response.json({ admins });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/coaching/admins", async (request, response, next) => {
+  if (!isPrimaryCoachingAdmin(request)) return response.status(403).json({ error: "Only the primary coaching administrator can manage admins." });
+  try {
+    const { email } = coachingAdminEmailSchema.parse(request.body);
+    if (email === coachingAdminEmail) return response.status(409).json({ error: "That account is already the primary administrator." });
+    await ensureCoachingAdminTable();
+    if (await prisma.coachingAdmin.findUnique({ where: { email }, select: { email: true } })) {
+      return response.status(409).json({ error: "That email already has administrator access." });
+    }
+    await ensureCoachingAdminInviteTable();
+    if (await prisma.coachingAdminInvite.findFirst({ where: { email, expiresAt: { gt: new Date() } }, select: { id: true } })) {
+      return response.status(409).json({ error: "An active admin invitation already exists for that email." });
+    }
+    const token = createPasswordResetToken();
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await prisma.coachingAdminInvite.create({
+      data: { email, tokenHash: hashPasswordResetToken(token), expiresAt, createdByEmail: coachingAdminEmail },
+    });
+    response.status(201).json({ email, token, expiresAt });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return response.status(409).json({ error: "That email already has administrator access." });
+    }
+    next(error);
+  }
+});
+
+app.post("/api/coaching/admin-invites/accept", async (request, response, next) => {
+  try {
+    const identity = (request as AuthenticatedRequest).authIdentity;
+    if (!identity) return response.status(401).json({ error: "Sign in with the invited email address to accept this invitation." });
+    const { token } = coachingAdminInviteSchema.parse(request.body);
+    const email = identity.email.toLowerCase();
+    if (email === coachingAdminEmail) return response.status(409).json({ error: "This account is already the primary administrator." });
+    await ensureCoachingAdminInviteTable();
+    const invitation = await prisma.coachingAdminInvite.findUnique({
+      where: { tokenHash: hashPasswordResetToken(token) },
+    });
+    if (!invitation) return response.status(404).json({ error: "This administrator invitation is invalid or has already been used." });
+    if (invitation.email !== email) return response.status(403).json({ error: "Sign in using the email address this invitation was sent to." });
+    if (invitation.expiresAt <= new Date()) {
+      await prisma.coachingAdminInvite.delete({ where: { id: invitation.id } });
+      return response.status(410).json({ error: "This administrator invitation has expired. Ask the primary admin for a new one." });
+    }
+    await ensureCoachingAdminTable();
+    await prisma.coachingAdmin.upsert({
+      where: { email },
+      create: { email, createdByEmail: invitation.createdByEmail },
+      update: {},
+    });
+    await prisma.coachingAdminInvite.delete({ where: { id: invitation.id } });
+    response.json({ email });
+  } catch (error) { next(error); }
+});
+
+app.delete("/api/coaching/admins/:email", async (request, response, next) => {
+  if (!isPrimaryCoachingAdmin(request)) return response.status(403).json({ error: "Only the primary coaching administrator can manage admins." });
+  try {
+    const { email } = coachingAdminEmailSchema.parse({ email: request.params.email });
+    if (email === coachingAdminEmail) return response.status(409).json({ error: "The primary administrator cannot be removed." });
+    await ensureCoachingAdminTable();
+    const removed = await prisma.coachingAdmin.deleteMany({ where: { email } });
+    if (removed.count === 0) return response.status(404).json({ error: "That administrator was not found." });
+    response.status(204).end();
   } catch (error) { next(error); }
 });
 
@@ -302,38 +691,53 @@ app.post("/api/estimate-plan", (request, response, next) => {
 
 app.get("/api/days/:date", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const date = dateResponse(request.params.date);
-    const day = await prisma.day.upsert({ where: { date }, create: { date }, update: {} });
-    response.json(await prisma.day.findUnique({ where: { id: day.id }, include: { foods: { orderBy: { createdAt: "asc" } }, workouts: { orderBy: { createdAt: "asc" } } } }));
+    const day = await prisma.day.upsert({
+      where: { userId_date: { userId, date } },
+      create: { userId, date },
+      update: {},
+      include: { foods: { orderBy: { createdAt: "asc" } }, workouts: { orderBy: { createdAt: "asc" } } },
+    });
+    const { userId: _userId, ...publicDay } = day;
+    response.json(publicDay);
   } catch (error) { next(error); }
 });
 
 app.get("/api/days", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const from = dateSchema.parse(request.query.from);
     const to = dateSchema.parse(request.query.to);
     if (from > to || to > today()) return response.status(400).json({ error: "Choose a valid date range." });
-    const days = await prisma.day.findMany({ where: { date: { gte: from, lte: to } }, include: { foods: true, workouts: true }, orderBy: { date: "asc" } });
-    response.json(days);
+    const days = await prisma.day.findMany({ where: { userId, date: { gte: from, lte: to } }, include: { foods: true, workouts: true }, orderBy: { date: "asc" } });
+    response.json(days.map(({ userId: _userId, ...day }) => day));
   } catch (error) { next(error); }
 });
 
 app.patch("/api/days/:date", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const date = dateResponse(request.params.date);
     const input = z.object({ weightKg: z.number().min(20).max(500).nullable().optional(), waterGlasses: z.number().int().min(0).max(100).optional() }).strict().parse(request.body);
-    const day = await prisma.day.upsert({ where: { date }, create: { date, ...input }, update: input });
-    response.json(day);
+    const day = await prisma.day.upsert({
+      where: { userId_date: { userId, date } },
+      create: { userId, date, ...input },
+      update: input,
+    });
+    const { userId: _userId, ...publicDay } = day;
+    response.json(publicDay);
   } catch (error) { next(error); }
 });
 
 app.post("/api/foods", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const input = foodSchema.parse(request.body);
     const date = dateResponse(input.date);
     const { date: _date, photoThumbnail, ...food } = input;
-    const settings = await prisma.settings.findUnique({ where: { id: "default" } });
-    const day = await prisma.day.upsert({ where: { date }, create: { date }, update: {} });
+    const settings = await prisma.settings.findUnique({ where: { id: settingsIdFor(userId) } });
+    const day = await prisma.day.upsert({ where: { userId_date: { userId, date } }, create: { userId, date }, update: {} });
     const entry = await prisma.foodEntry.create({
       data: { ...food, dayId: day.id, photoThumbnail: settings?.keepPhotoThumbnails ? photoThumbnail : null },
     });
@@ -343,14 +747,15 @@ app.post("/api/foods", async (request, response, next) => {
 
 app.delete("/api/foods/:id", async (request, response, next) => {
   try {
-    await prisma.foodEntry.delete({ where: { id: request.params.id } });
+    const deleted = await prisma.foodEntry.deleteMany({ where: { id: request.params.id, day: { is: { userId: userIdFor(request) } } } });
+    if (deleted.count === 0) return response.status(404).json({ error: "That log entry no longer exists." });
     response.status(204).end();
   } catch (error) { next(error); }
 });
 
-app.get("/api/foods/recent", async (_request, response, next) => {
+app.get("/api/foods/recent", async (request, response, next) => {
   try {
-    const foods = await prisma.foodEntry.findMany({ distinct: ["name"], orderBy: { createdAt: "desc" }, take: 12 });
+    const foods = await prisma.foodEntry.findMany({ where: { day: { is: { userId: userIdFor(request) } } }, distinct: ["name"], orderBy: { createdAt: "desc" }, take: 12 });
     response.json(foods);
   } catch (error) { next(error); }
 });
@@ -365,16 +770,18 @@ app.get("/api/foods/search", async (request, response, next) => {
 
 app.post("/api/workouts", async (request, response, next) => {
   try {
+    const userId = userIdFor(request);
     const input = workoutSchema.parse(request.body);
     const date = dateResponse(input.date);
-    const day = await prisma.day.upsert({ where: { date }, create: { date }, update: {} });
+    const day = await prisma.day.upsert({ where: { userId_date: { userId, date } }, create: { userId, date }, update: {} });
     response.status(201).json(await prisma.workout.create({ data: { ...input, dayId: day.id } }));
   } catch (error) { next(error); }
 });
 
 app.delete("/api/workouts/:id", async (request, response, next) => {
   try {
-    await prisma.workout.delete({ where: { id: request.params.id } });
+    const deleted = await prisma.workout.deleteMany({ where: { id: request.params.id, day: { is: { userId: userIdFor(request) } } } });
+    if (deleted.count === 0) return response.status(404).json({ error: "That log entry no longer exists." });
     response.status(204).end();
   } catch (error) { next(error); }
 });
@@ -388,9 +795,10 @@ app.post("/api/analyze-meal", mealAnalysisLimiter, async (request, response, nex
     if (imageSize > 5 * 1024 * 1024) return response.status(413).json({ error: "The image must be 5 MB or smaller." });
     if (imageSize < 1) return response.status(400).json({ error: "The image could not be read. Please choose another." });
 
+    const userId = userIdFor(request);
     const usageDate = utcDateKey();
     try {
-      await reservePhotoScan(usageDate);
+      await reservePhotoScan(userId, usageDate);
     } catch (error) {
       if (error instanceof ScanLimitError) return response.status(429).json({ error: "You’ve used today’s three free photo scans. More will be available after the daily reset." });
       throw error;
@@ -415,12 +823,12 @@ app.post("/api/analyze-meal", mealAnalysisLimiter, async (request, response, nex
         }),
       });
     } catch (error) {
-      await releasePhotoScan(usageDate);
+      await releasePhotoScan(userId, usageDate);
       throw error;
     }
 
     if (!googleResponse.ok) {
-      await releasePhotoScan(usageDate);
+      await releasePhotoScan(userId, usageDate);
       if (googleResponse.status === 429) return response.status(503).json({ error: "Google’s free scan quota is temporarily full. Try again later; this attempt did not use one of your daily scans." });
       console.error("Gemini request failed with status", googleResponse.status);
       return response.status(503).json({ error: "Google’s free photo scan service is temporarily unavailable. Try again later." });

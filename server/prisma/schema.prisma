@@ -7,6 +7,38 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+model User {
+  id                  String               @id @default(cuid())
+  email               String               @unique
+  name                String
+  passwordHash        String
+  createdAt           DateTime             @default(now())
+  sessions            Session[]
+  passwordResetTokens PasswordResetToken[]
+}
+
+model Session {
+  tokenHash String   @id
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  tokenHash String   @id
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
 model Settings {
   id                    String  @id @default("default")
   goalType              String?
@@ -28,13 +60,16 @@ model Settings {
 
 model Day {
   id           String       @id @default(cuid())
-  date         String       @unique
+  userId       String       @default("local")
+  date         String
   weightKg     Float?
   waterGlasses Int          @default(0)
   foods        FoodEntry[]
   workouts     Workout[]
   createdAt    DateTime     @default(now())
   updatedAt    DateTime     @updatedAt
+
+  @@unique([userId, date])
 }
 
 model FoodEntry {
@@ -68,8 +103,52 @@ model Workout {
   @@index([dayId])
 }
 
+model WorkoutPlan {
+  userId      String   @id
+  days        String   @default("[]")
+  preferences String   @default("{}")
+  updatedAt   DateTime @updatedAt
+}
+
+model CoachingEnquiry {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  email        String
+  goal         String
+  availability String
+  message      String
+  status       String   @default("new")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([createdAt])
+  @@index([status])
+}
+
+model CoachingAdmin {
+  email          String   @id
+  createdAt      DateTime @default(now())
+  createdByEmail String
+}
+
+model CoachingAdminInvite {
+  id             String   @id @default(cuid())
+  email          String
+  tokenHash      String   @unique
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+  createdByEmail String
+
+  @@index([email])
+  @@index([expiresAt])
+}
+
 model PhotoScanUsage {
-  date      String   @id
+  userId    String   @default("local")
+  date      String
   scans     Int      @default(0)
   updatedAt DateTime @updatedAt
+
+  @@id([userId, date])
 }

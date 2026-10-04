@@ -11,9 +11,9 @@ export default defineConfig({
       registerType: "autoUpdate",
       includeAssets: ["fuel-mark.svg", "apple-touch-icon.png"],
       manifest: {
-        name: "Fuel log",
-        short_name: "Fuel log",
-        description: "A thoughtful daily nutrition and movement log.",
+        name: "Fitbiter",
+        short_name: "Fitbiter",
+        description: "STAY FIT. LOG YOUR BITS. A thoughtful daily nutrition and movement log.",
         theme_color: "#f4f5ef",
         background_color: "#f4f5ef",
         display: "standalone",

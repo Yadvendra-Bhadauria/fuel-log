@@ -3,6 +3,51 @@ export type GoalType = "lose" | "maintain" | "gain";
 export type FoodSource = "manual" | "open_food_facts" | "usda" | "photo_ai";
 export type Confidence = "low" | "medium" | "high";
 
+export const workoutPlanWeekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"] as const;
+export type WorkoutPlanWeekday = typeof workoutPlanWeekdays[number];
+export type WorkoutPlanFocus = "fat-loss" | "strength" | "general-fitness" | "stamina";
+export type WorkoutPlanEquipment = "bodyweight" | "dumbbells" | "gym";
+export type WorkoutPlanTrainingStyle = "balanced" | "push-pull-legs" | "body-part";
+
+export interface WorkoutPlanPreferences {
+  focus: WorkoutPlanFocus;
+  daysPerWeek: 2 | 3 | 4 | 5 | 6 | 7;
+  equipment: WorkoutPlanEquipment;
+  sessionMinutes: 20 | 30 | 45 | 60;
+  trainingStyle?: WorkoutPlanTrainingStyle;
+}
+
+export interface WorkoutPlanExercise {
+  id: string;
+  name: string;
+  sets: number;
+  reps: string;
+  notes: string;
+}
+
+export interface WorkoutPlanDay {
+  day: WorkoutPlanWeekday;
+  label?: string;
+  warmUp?: string;
+  coolDown?: string;
+  exercises: WorkoutPlanExercise[];
+}
+
+export interface WorkoutPlan {
+  days: WorkoutPlanDay[];
+  preferences: WorkoutPlanPreferences | null;
+}
+
+export interface ExerciseCatalogEntry {
+  id: number;
+  name: string;
+  category: string;
+  equipment: string[];
+  license: string;
+  licenseUrl: string | null;
+  author: string;
+}
+
 export interface FoodEntry {
   id: string;
   dayId: string;
@@ -123,3 +168,5 @@ export function scaleNutrition<T extends {
     fat_g: Math.round(item.fat_g * factor * 10) / 10,
   };
 }
+
+export { createBeginnerWorkoutPlan, defaultWorkoutFocus } from "./workoutPlans.js";

@@ -1,19 +1,33 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
-  Activity, Apple, ArrowDown, ArrowLeft, ArrowRight, BarChart3, Barcode, Check, ChevronDown,
-  CircleHelp, Droplets, Footprints, LogOut, Moon, Plus, Scale, Settings2, Sun, Trash2,
-  Upload, Utensils, X,
+  Activity, ArrowDown, ArrowLeft, ArrowRight, BarChart3, Barcode, Check, ChevronDown, ExternalLink,
+  CircleHelp, Clock3, Droplets, Dumbbell, Footprints, LogOut, Mail, Moon, Plus, Scale, Settings2, Sun, Trash2,
+  Utensils, X,
 } from "lucide-react";
-import { scaleNutrition, type DayRecord, type FoodEntry, type GoalType, type Meal, type MealAnalysisItem, type ProductMatch, type Settings, type WeightPlan, type Workout } from "@fuel-log/shared";
-import GoogleLogin, { type AuthUser } from "./GoogleLogin";
+import { createBeginnerWorkoutPlan, defaultWorkoutFocus, workoutPlanWeekdays, type DayRecord, type ExerciseCatalogEntry, type FoodEntry, type GoalType, type Meal, type ProductMatch, type Settings, type WeightPlan, type Workout, type WorkoutPlan, type WorkoutPlanEquipment, type WorkoutPlanExercise, type WorkoutPlanFocus, type WorkoutPlanPreferences, type WorkoutPlanTrainingStyle } from "@fuel-log/shared";
+import AuthPage, { type AuthUser } from "./AuthPage";
 
-type Tab = "today" | "progress" | "goals";
-type ReviewItem = MealAnalysisItem & { base: MealAnalysisItem };
-type PhotoScanStatus = { configured: boolean; enabled: boolean; limit: number; used: number; remaining: number };
+type Tab = "today" | "progress" | "goals" | "workout-plan" | "coaching-admin";
 const ProgressView = lazy(() => import("./ProgressView"));
+type CoachingEnquiry = {
+  id: string;
+  name: string;
+  email: string;
+  goal: "lose-weight" | "build-strength" | "improve-fitness" | "other";
+  availability: string;
+  message: string;
+  status: "new" | "contacted" | "closed";
+  createdAt: string;
+};
+type CoachingInboxData = { accountCount: number; newAccounts30d: number; enquiries: CoachingEnquiry[] };
+type CoachingAdmin = { email: string; createdAt: string };
 
 const mealOrder: Meal[] = ["breakfast", "lunch", "dinner", "snack"];
 const mealColor: Record<Meal, string> = { breakfast: "#f6bd60", lunch: "#71b8a2", dinner: "#ed8064", snack: "#a6a4d5" };
+const emptyWorkoutPlan = (): WorkoutPlan => ({
+  days: workoutPlanWeekdays.map((day) => ({ day, exercises: [] })),
+  preferences: null,
+});
 const emptySettings: Settings = {
   goalType: null, calorieTarget: null, proteinTarget: null, carbsTarget: null, fatTarget: null,
   currentWeightKg: null, targetWeightKg: null, weeklyActiveMinutes: 150, includeExerciseCalories: true,
@@ -33,7 +47,7 @@ const number = (value: number | null | undefined) => Math.round(value ?? 0).toLo
 const fieldNumber = (value: string) => value === "" ? null : Number(value);
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
-  const token = sessionStorage.getItem("fuel-google-token");
+  const token = sessionStorage.getItem("fuel-session-token");
   const response = await fetch(path, {
     ...options,
     headers: {
@@ -45,52 +59,48 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: string } | null;
     if (response.status === 401 && path !== "/api/auth/config") window.dispatchEvent(new Event("fuel-auth-expired"));
-    throw new Error(body?.error ?? "Could not reach Fuel log. Check that the API is running.");
+    throw new Error(body?.error ?? "Could not reach Fitbiter. Check that the API is running.");
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
-function nutritionForGrams(item: MealAnalysisItem, grams: number): MealAnalysisItem {
-  return scaleNutrition(item, grams);
-}
-
-async function preparePhoto(file: File) {
-  const bitmap = await createImageBitmap(file);
-  const scale = Math.min(1, 1568 / Math.max(bitmap.width, bitmap.height));
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-  canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-  canvas.getContext("2d")!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
-  const blob = await new Promise<Blob>((resolve, reject) => canvas.toBlob((value) => value ? resolve(value) : reject(new Error("Could not prepare this image.")), "image/jpeg", 0.85));
-  if (blob.size > 5 * 1024 * 1024) throw new Error("This image is still larger than 5 MB. Try a smaller photo.");
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Could not read this image."));
-    reader.readAsDataURL(blob);
-  });
-  const thumbnail = document.createElement("canvas");
-  const thumbScale = Math.min(1, 320 / Math.max(canvas.width, canvas.height));
-  thumbnail.width = Math.max(1, Math.round(canvas.width * thumbScale));
-  thumbnail.height = Math.max(1, Math.round(canvas.height * thumbScale));
-  thumbnail.getContext("2d")!.drawImage(canvas, 0, 0, thumbnail.width, thumbnail.height);
-  return { dataUrl, base64: dataUrl.split(",")[1], thumbnail: thumbnail.toDataURL("image/jpeg", 0.72) };
-}
-
 function App() {
-  const [authConfig, setAuthConfig] = useState<{ required: boolean; configured: boolean; clientId: string | null } | null>(null);
+  const [authConfig, setAuthConfig] = useState<{ required: boolean; passwordResetEnabled: boolean } | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [tab, setTab] = useState<Tab>("today");
   const [date, setDate] = useState(localToday());
   const [day, setDay] = useState<DayRecord | null>(null);
+  const [weightDraft, setWeightDraft] = useState("");
   const [settings, setSettings] = useState<Settings>(emptySettings);
+  const [workoutPlan, setWorkoutPlan] = useState<WorkoutPlan>(emptyWorkoutPlan);
+  const [workoutPlanSaved, setWorkoutPlanSaved] = useState(false);
+  const [workoutPlanBusy, setWorkoutPlanBusy] = useState(false);
+  const [isCoachingAdmin, setIsCoachingAdmin] = useState(false);
+  const [canManageCoachingAdmins, setCanManageCoachingAdmins] = useState(false);
+  const [coachingEnquiries, setCoachingEnquiries] = useState<CoachingEnquiry[]>([]);
+  const [coachingAdmins, setCoachingAdmins] = useState<CoachingAdmin[]>([]);
+  const [coachingAdminEmailDraft, setCoachingAdminEmailDraft] = useState("");
+  const [coachingAdminInviteUrl, setCoachingAdminInviteUrl] = useState("");
+  const [coachingAdminBusy, setCoachingAdminBusy] = useState(false);
+  const [coachingAccountCount, setCoachingAccountCount] = useState(0);
+  const [coachingNewAccounts30d, setCoachingNewAccounts30d] = useState(0);
+  const [coachingInboxLoading, setCoachingInboxLoading] = useState(false);
+  const [coachingInboxRefresh, setCoachingInboxRefresh] = useState(0);
+  const [coachingModal, setCoachingModal] = useState(false);
+  const [coachingSubmitting, setCoachingSubmitting] = useState(false);
+  const [coachingFormError, setCoachingFormError] = useState("");
+  const [coachingName, setCoachingName] = useState("");
+  const [coachingEmail, setCoachingEmail] = useState("");
+  const [coachingGoal, setCoachingGoal] = useState<CoachingEnquiry["goal"]>("improve-fitness");
+  const [coachingAvailability, setCoachingAvailability] = useState("");
+  const [coachingMessage, setCoachingMessage] = useState("");
   const [recent, setRecent] = useState<FoodEntry[]>([]);
   const [progressDays, setProgressDays] = useState<DayRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const [theme, setTheme] = useState(() => localStorage.getItem("fuel-theme") ?? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"));
   const [meal, setMeal] = useState<Meal>("breakfast");
   const [foodName, setFoodName] = useState("");
@@ -107,22 +117,13 @@ function App() {
   const [activity, setActivity] = useState("");
   const [minutes, setMinutes] = useState("");
   const [burned, setBurned] = useState("");
-  const [scanBusy, setScanBusy] = useState(false);
-  const [scanNote, setScanNote] = useState("");
-  const [scanStatus, setScanStatus] = useState<PhotoScanStatus | null>(null);
-  const [photoConsent, setPhotoConsent] = useState(() => localStorage.getItem("fuel-google-photo-consent") === "accepted");
-  const [reviewPhoto, setReviewPhoto] = useState("");
-  const [reviewThumbnail, setReviewThumbnail] = useState("");
-  const [reviewItems, setReviewItems] = useState<ReviewItem[]>([]);
-  const [reviewMeal, setReviewMeal] = useState<Meal>("lunch");
-  const [reviewModal, setReviewModal] = useState(false);
   const [barcodeModal, setBarcodeModal] = useState(false);
   const [barcodeProduct, setBarcodeProduct] = useState<ProductMatch | null>(null);
   const [barcodeGrams, setBarcodeGrams] = useState("100");
   const [barcodeStatus, setBarcodeStatus] = useState("");
   const [goalSaved, setGoalSaved] = useState(false);
-  const photoInput = useRef<HTMLInputElement>(null);
-
+  const adminInviteToken = new URLSearchParams(window.location.search).get("adminInvite");
+  const adminInviteAttempt = useRef<string | null>(null);
   const refreshDay = async () => {
     const data = await api<DayRecord>(`/api/days/${date}`);
     setDay(data);
@@ -134,8 +135,18 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
+    if (!successMessage) return;
+    const timeout = window.setTimeout(() => setSuccessMessage(""), 3500);
+    return () => window.clearTimeout(timeout);
+  }, [successMessage]);
+
+  useEffect(() => {
+    setWeightDraft(day?.weightKg == null ? "" : String(day.weightKg));
+  }, [date, day?.weightKg]);
+
+  useEffect(() => {
     const expireSession = () => {
-      sessionStorage.removeItem("fuel-google-token");
+      sessionStorage.removeItem("fuel-session-token");
       setAuthUser(null);
     };
     window.addEventListener("fuel-auth-expired", expireSession);
@@ -146,18 +157,18 @@ function App() {
     let active = true;
     const initializeAuth = async () => {
       try {
-        const config = await api<{ required: boolean; configured: boolean; clientId: string | null }>("/api/auth/config");
+        const config = await api<{ required: boolean; passwordResetEnabled: boolean }>("/api/auth/config");
         if (!active) return;
         setAuthConfig(config);
-        if (config.required && config.configured && sessionStorage.getItem("fuel-google-token")) {
+        if (config.required && sessionStorage.getItem("fuel-session-token")) {
           try {
             setAuthUser(await api<AuthUser>("/api/auth/me"));
           } catch {
-            sessionStorage.removeItem("fuel-google-token");
+            sessionStorage.removeItem("fuel-session-token");
           }
         }
       } catch {
-        if (active) setAuthConfig({ required: true, configured: false, clientId: null });
+        if (active) setAuthConfig({ required: true, passwordResetEnabled: false });
       } finally {
         if (active) setAuthLoading(false);
       }
@@ -165,6 +176,29 @@ function App() {
     void initializeAuth();
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    if (!adminInviteToken || !authUser || authLoading || adminInviteAttempt.current === adminInviteToken) return;
+    adminInviteAttempt.current = adminInviteToken;
+    let active = true;
+    api<{ email: string }>("/api/coaching/admin-invites/accept", {
+      method: "POST",
+      body: JSON.stringify({ token: adminInviteToken }),
+    }).then(({ email }) => {
+      if (!active) return;
+      const url = new URL(window.location.href);
+      url.searchParams.delete("adminInvite");
+      window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+      setIsCoachingAdmin(true);
+      setTab("coaching-admin");
+      setSuccessMessage(`Administrator access activated for ${email}.`);
+    }).catch((reason: unknown) => {
+      if (!active) return;
+      adminInviteAttempt.current = null;
+      setError(reason instanceof Error ? reason.message : "Could not accept this administrator invitation.");
+    });
+    return () => { active = false; };
+  }, [adminInviteToken, authUser, authLoading]);
 
   useEffect(() => {
     if (authLoading || authConfig === null || (authConfig.required && !authUser)) {
@@ -178,13 +212,16 @@ function App() {
       api<Settings>("/api/settings"),
       api<DayRecord>(`/api/days/${date}`),
       api<FoodEntry[]>("/api/foods/recent"),
-      api<PhotoScanStatus>("/api/meal-scans/status"),
-    ]).then(([nextSettings, nextDay, nextRecent, nextScanStatus]) => {
+      api<WorkoutPlan>("/api/workout-plan"),
+      api<{ isAdmin: boolean; canManageAdmins: boolean }>("/api/coaching/admin-status"),
+    ]).then(([nextSettings, nextDay, nextRecent, nextWorkoutPlan, adminStatus]) => {
       if (!active) return;
       setSettings(nextSettings);
       setDay(nextDay);
       setRecent(nextRecent);
-      setScanStatus(nextScanStatus);
+      setWorkoutPlan(nextWorkoutPlan);
+      setIsCoachingAdmin(adminStatus.isAdmin);
+      setCanManageCoachingAdmins(adminStatus.canManageAdmins);
     }).catch((reason: unknown) => active && setError(reason instanceof Error ? reason.message : "Could not load your log."))
       .finally(() => active && setLoading(false));
     return () => { active = false; };
@@ -195,6 +232,27 @@ function App() {
     const from = shiftDate(localToday(), -364);
     api<DayRecord[]>(`/api/days?from=${from}&to=${localToday()}`).then(setProgressDays).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load progress."));
   }, [tab, authLoading, authConfig, authUser]);
+
+  useEffect(() => {
+    if (tab !== "coaching-admin" || !isCoachingAdmin) return;
+    let active = true;
+    setCoachingInboxLoading(true);
+    const requests: [Promise<CoachingInboxData>, Promise<{ admins: CoachingAdmin[] }> | null] = [
+      api<CoachingInboxData>("/api/coaching/enquiries"),
+      canManageCoachingAdmins ? api<{ admins: CoachingAdmin[] }>("/api/coaching/admins") : null,
+    ];
+    Promise.all(requests)
+      .then(([data, adminData]) => {
+        if (!active) return;
+        setCoachingEnquiries(data.enquiries);
+        setCoachingAccountCount(data.accountCount);
+        setCoachingNewAccounts30d(data.newAccounts30d);
+        if (adminData) setCoachingAdmins(adminData.admins);
+      })
+      .catch((reason: unknown) => active && setError(reason instanceof Error ? reason.message : "Could not load coaching enquiries."))
+      .finally(() => active && setCoachingInboxLoading(false));
+    return () => { active = false; };
+  }, [tab, isCoachingAdmin, canManageCoachingAdmins, coachingInboxRefresh]);
 
   const foods = day?.foods ?? [];
   const workouts = day?.workouts ?? [];
@@ -228,16 +286,44 @@ function App() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not update this day."); }
   };
 
+  const saveWeight = () => {
+    if (weightDraft === "") {
+      if (day?.weightKg != null) void patchDay({ weightKg: null });
+      return;
+    }
+    const weightKg = Number(weightDraft);
+    if (!Number.isFinite(weightKg) || weightKg < 20 || weightKg > 500) {
+      setError("Enter a weight between 20 and 500 kg.");
+      return;
+    }
+    if (weightKg !== day?.weightKg) void patchDay({ weightKg });
+  };
+
   const addFood = async (input: {
     name: string; meal: Meal; kcal: number; grams?: number | null; proteinG?: number | null;
     carbsG?: number | null; fatG?: number | null; source?: string; confidence?: string | null; photoThumbnail?: string;
-  }) => {
+  }, notify = true) => {
     try {
       await api<FoodEntry>("/api/foods", { method: "POST", body: JSON.stringify({ date, ...input }) });
-      await refreshDay();
-      setRecent(await api<FoodEntry[]>("/api/foods/recent"));
-      setError("");
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not add this food."); }
+      if (notify) {
+        setError("");
+        setSuccessMessage("Meal added");
+      }
+      try {
+        const [nextDay, nextRecent] = await Promise.all([
+          api<DayRecord>(`/api/days/${date}`),
+          api<FoodEntry[]>("/api/foods/recent"),
+        ]);
+        setDay(nextDay);
+        setRecent(nextRecent);
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "The meal was saved, but your log could not be refreshed.");
+      }
+      return true;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not add this food.");
+      return false;
+    }
   };
 
   const removeFood = async (id: string) => {
@@ -275,55 +361,150 @@ function App() {
 
   const submitFoodForm = async (event: React.FormEvent) => {
     event.preventDefault();
-    await addFood({
+    const added = await addFood({
       name: foodName.trim(), meal, kcal: Number(foodKcal), grams: fieldNumber(foodGrams),
       proteinG: fieldNumber(foodProtein), carbsG: fieldNumber(foodCarbs), fatG: fieldNumber(foodFat),
       source: foodSource,
     });
+    if (!added) return;
     setFoodName(""); setFoodKcal(""); setFoodGrams(""); setFoodProtein(""); setFoodCarbs(""); setFoodFat(""); setFoodSource("manual"); setLookupMessage(""); setShowFoodForm(false);
   };
 
-  const scanPhoto = async (file?: File) => {
-    if (!file) return;
-    if (!photoConsent) { setError("Acknowledge Google’s free-tier photo data use before scanning."); return; }
-    if (!scanStatus?.enabled) { setError(scanStatus?.configured ? "You’ve used today’s free photo scans." : "Free photo scans are not configured yet."); return; }
-    setScanBusy(true); setError("");
+  const updatePlanExercise = (dayIndex: number, exerciseId: string, patch: Partial<WorkoutPlanExercise>) => {
+    setWorkoutPlan((current) => ({
+      ...current,
+      days: current.days.map((day, index) => index === dayIndex
+        ? { ...day, exercises: day.exercises.map((exercise) => exercise.id === exerciseId ? { ...exercise, ...patch } : exercise) }
+        : day),
+    }));
+    setWorkoutPlanSaved(false);
+  };
+
+  const addPlanExercise = (dayIndex: number) => {
+    setWorkoutPlan((current) => ({
+      ...current,
+      days: current.days.map((day, index) => index === dayIndex
+        ? { ...day, exercises: [...day.exercises, { id: crypto.randomUUID(), name: "", sets: 3, reps: "8-12", notes: "" }] }
+        : day),
+    }));
+    setWorkoutPlanSaved(false);
+  };
+
+  const removePlanExercise = (dayIndex: number, exerciseId: string) => {
+    setWorkoutPlan((current) => ({
+      ...current,
+      days: current.days.map((day, index) => index === dayIndex
+        ? { ...day, exercises: day.exercises.filter((exercise) => exercise.id !== exerciseId) }
+        : day),
+    }));
+    setWorkoutPlanSaved(false);
+  };
+
+  const saveWorkoutPlan = async () => {
+    setWorkoutPlanBusy(true);
+    setError("");
     try {
-      const prepared = await preparePhoto(file);
-      setReviewPhoto(prepared.dataUrl); setReviewThumbnail(prepared.thumbnail);
-      const result = await api<{ is_food: boolean; items: MealAnalysisItem[]; notes: string }>("/api/analyze-meal", {
-        method: "POST", body: JSON.stringify({ imageBase64: prepared.base64, mediaType: "image/jpeg", note: scanNote, consentToGoogleFreeTier: true }),
-      });
-      if (!result.is_food || result.items.length === 0) throw new Error("That photo does not appear to show food. Try another image.");
-      setReviewItems(result.items.map((item) => ({ ...item, base: { ...item } })));
-      setReviewModal(true); setReviewMeal(meal);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Could not analyze this photo."); }
-    finally {
-      setScanBusy(false); setScanNote(""); if (photoInput.current) photoInput.current.value = "";
-      void api<PhotoScanStatus>("/api/meal-scans/status").then(setScanStatus).catch(() => {});
+      const savedPlan = await api<WorkoutPlan>("/api/workout-plan", { method: "PUT", body: JSON.stringify(workoutPlan) });
+      setWorkoutPlan(savedPlan);
+      setWorkoutPlanSaved(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save your workout plan.");
+    } finally {
+      setWorkoutPlanBusy(false);
     }
   };
 
-  const setGooglePhotoConsent = (accepted: boolean) => {
-    setPhotoConsent(accepted);
-    if (accepted) localStorage.setItem("fuel-google-photo-consent", "accepted");
-    else localStorage.removeItem("fuel-google-photo-consent");
-  };
-
-  const updateReviewGrams = (index: number, grams: number) => {
-    setReviewItems((items) => items.map((item, itemIndex) => itemIndex === index ? { ...nutritionForGrams(item.base, grams), base: item.base } : item));
-  };
-
-  const saveReview = async () => {
-    for (const item of reviewItems) {
-      await addFood({
-        name: item.name, meal: reviewMeal, kcal: item.kcal, grams: item.grams,
-        proteinG: item.protein_g, carbsG: item.carbs_g, fatG: item.fat_g,
-        source: item.source ?? "photo_ai", confidence: item.confidence,
-        photoThumbnail: settings.keepPhotoThumbnails ? reviewThumbnail : undefined,
+  const submitCoachingEnquiry = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setCoachingSubmitting(true);
+    setCoachingFormError("");
+    try {
+      const result = await api<{ emailStatus: "sent" | "not-configured" | "failed" }>("/api/coaching/enquiries", {
+        method: "POST",
+        body: JSON.stringify({
+          name: coachingName,
+          email: coachingEmail,
+          goal: coachingGoal,
+          availability: coachingAvailability,
+          message: coachingMessage,
+        }),
       });
+      setCoachingModal(false);
+      setCoachingName("");
+      setCoachingEmail("");
+      setCoachingGoal("improve-fitness");
+      setCoachingAvailability("");
+      setCoachingMessage("");
+      setSuccessMessage(result.emailStatus === "sent"
+        ? "Your enquiry was saved and emailed to the coaching team."
+        : result.emailStatus === "not-configured"
+          ? "Your enquiry was saved, but email delivery is not configured. It is available in the Fitbiter Coach inbox."
+          : "Your enquiry was saved, but its notification email could not be delivered. It is available in the Fitbiter Coach inbox.");
+    } catch (reason) {
+      setCoachingFormError(reason instanceof Error ? reason.message : "Could not send your enquiry.");
+    } finally {
+      setCoachingSubmitting(false);
     }
-    setReviewModal(false); setReviewItems([]);
+  };
+
+  const updateCoachingEnquiry = async (id: string, status: CoachingEnquiry["status"]) => {
+    try {
+      const updated = await api<CoachingEnquiry>(`/api/coaching/enquiries/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      setCoachingEnquiries((current) => current.map((enquiry) => enquiry.id === id ? updated : enquiry));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not update this coaching enquiry.");
+    }
+  };
+
+  const addCoachingAdmin = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setCoachingAdminBusy(true);
+    try {
+      const invite = await api<{ email: string; token: string; expiresAt: string }>("/api/coaching/admins", {
+        method: "POST",
+        body: JSON.stringify({ email: coachingAdminEmailDraft }),
+      });
+      setCoachingAdminInviteUrl(`${window.location.origin}/?adminInvite=${encodeURIComponent(invite.token)}`);
+      setCoachingAdminEmailDraft("");
+      setSuccessMessage(`An admin invitation for ${invite.email} is ready to share. It expires in 7 days.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not add this admin.");
+    } finally {
+      setCoachingAdminBusy(false);
+    }
+  };
+
+  const copyCoachingAdminInvite = async () => {
+    try {
+      await navigator.clipboard.writeText(coachingAdminInviteUrl);
+      setSuccessMessage("Admin invitation link copied. Share it privately with the intended person.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not copy the invitation link. Select and copy it manually.");
+    }
+  };
+
+  const removeCoachingAdmin = async (email: string) => {
+    if (!window.confirm(`Remove trainer admin access for ${email}?`)) return;
+    setCoachingAdminBusy(true);
+    try {
+      await api<void>(`/api/coaching/admins/${encodeURIComponent(email)}`, { method: "DELETE" });
+      setCoachingAdmins((current) => current.filter((admin) => admin.email !== email));
+      setSuccessMessage(`${email} no longer has trainer admin access.`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not remove this admin.");
+    } finally {
+      setCoachingAdminBusy(false);
+    }
+  };
+
+  const generateWorkoutPlan = (preferences: WorkoutPlanPreferences) => {
+    if (workoutPlan.days.some((planDay) => planDay.exercises.length > 0) &&
+      !window.confirm("Create a new plan? This will replace the current plan draft. Save your existing plan first if you want to keep it.")) return;
+    setWorkoutPlan(createBeginnerWorkoutPlan(preferences));
+    setWorkoutPlanSaved(false);
   };
 
   const onBarcodeDetected = async (code: string) => {
@@ -338,24 +519,34 @@ function App() {
   const nav = [
     { id: "today" as const, label: "Today", icon: Utensils },
     { id: "progress" as const, label: "Progress", icon: BarChart3 },
+    { id: "workout-plan" as const, label: "Workout plan", icon: Dumbbell },
     { id: "goals" as const, label: "Goals", icon: Settings2 },
+    ...(isCoachingAdmin ? [{ id: "coaching-admin" as const, label: "Coach inbox", icon: Mail }] : []),
   ];
 
-  const signOut = () => {
-    sessionStorage.removeItem("fuel-google-token");
+  const signOut = async () => {
+    try {
+      await api<void>("/api/auth/logout", { method: "POST" });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not sign out cleanly.");
+      return;
+    }
+    sessionStorage.removeItem("fuel-session-token");
     setAuthUser(null);
     setDay(null);
   };
 
   if (authLoading || authConfig === null) return <div className="auth-loading"><span className="loader" />Checking sign-in</div>;
-  if (authConfig.required && !authConfig.configured) return <GoogleLogin clientId={null} onSignIn={setAuthUser} />;
-  if (authConfig.required && !authUser) return <GoogleLogin clientId={authConfig.clientId} onSignIn={setAuthUser} />;
+  if (new URLSearchParams(window.location.search).has("resetToken")) {
+    return <AuthPage onSignIn={setAuthUser} passwordResetEnabled={authConfig.passwordResetEnabled} />;
+  }
+  if (authConfig.required && !authUser) return <AuthPage onSignIn={setAuthUser} passwordResetEnabled={authConfig.passwordResetEnabled} />;
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <a className="brand" href="#today" onClick={() => setTab("today")} aria-label="Fuel log home">
-          <span className="brand-mark">F<span>.</span></span><span>fuel<span className="brand-light">log</span></span>
+        <a className="brand" href="#today" onClick={() => setTab("today")} aria-label="Fitbiter home">
+          <span className="brand-mark">F<span>.</span></span><span>Fit<span className="brand-light">biter</span></span>
         </a>
         <div className="side-label">YOUR SPACE</div>
         <nav className="side-nav" aria-label="Main navigation">
@@ -370,15 +561,31 @@ function App() {
 
       <main className="main-content">
         <header className="topbar">
-          <div className="mobile-brand"><span className="brand-mark">F<span>.</span></span><span>fuel<span className="brand-light">log</span></span></div>
+          <div className="mobile-brand"><span className="brand-mark">F<span>.</span></span><span>Fit<span className="brand-light">biter</span></span></div>
           <div className="topbar-date">{prettyDate(date)}</div>
           {authUser && <button className="icon-button" onClick={signOut} aria-label="Sign out"><LogOut size={17} /></button>}
           <button className="icon-button top-theme" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} aria-label="Toggle color theme">{theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}</button>
         </header>
 
         {error && <div className="alert" role="alert"><span>{error}</span><button onClick={() => setError("")} aria-label="Dismiss"><X size={16} /></button></div>}
+        {successMessage && <div className="success-toast" role="status"><Check size={16} /><span>{successMessage}</span></div>}
         {loading ? <div className="loading-state"><span className="loader" />Loading your log</div> : <>
           {tab === "today" && <>
+            <section className="coaching-promo">
+              <img src="/fitbiter-coach.png" alt="Fitness coach standing in a gym with a kettlebell" />
+              <div className="coaching-promo-copy">
+                <div className="eyebrow">A COACH IN YOUR CORNER</div>
+                <h2>One-to-one coaching, built around you.</h2>
+                <p>Start with your personal trainer: get your first 3 days of coaching free, then £50 for 3 months of 1-to-1 coaching.</p>
+                <small>No payment is taken in Fitbiter. Send a private message to the trainer to ask about the offer.</small>
+              </div>
+              <button className="primary-button coaching-cta" onClick={() => {
+                setCoachingName(authUser?.name ?? "");
+                setCoachingEmail(authUser?.email ?? "");
+                setCoachingModal(true);
+                setCoachingFormError("");
+              }}><Mail size={16} /> Message your trainer</button>
+            </section>
             <section className="day-heading">
               <div><div className="eyebrow">DAILY LOG <span className="eyebrow-dot" /></div><h1>{date === localToday() ? "Today, in balance." : prettyDate(date)}</h1></div>
               <div className="date-stepper" aria-label="Choose a date"><button className="icon-button" onClick={() => setDate(shiftDate(date, -1))} aria-label="Previous day"><ArrowLeft size={17} /></button><input aria-label="Log date" type="date" max={localToday()} value={date} onChange={(event) => event.target.value && setDate(event.target.value)} /><button className="icon-button" onClick={() => setDate(shiftDate(date, 1))} disabled={date >= localToday()} aria-label="Next day"><ArrowRight size={17} /></button></div>
@@ -401,7 +608,7 @@ function App() {
             </section>
 
             <section className="quick-stats">
-              <div className="quick-stat"><div className="quick-stat-icon weight-icon"><Scale size={17} /></div><div><span>WEIGHT</span><strong>{day?.weightKg ? `${day.weightKg} kg` : "Add weight"}</strong></div><input aria-label="Weight in kilograms" type="number" min="20" max="500" step="0.1" placeholder="kg" value={day?.weightKg ?? ""} onChange={(event) => patchDay({ weightKg: fieldNumber(event.target.value) })} /></div>
+              <div className="quick-stat"><div className="quick-stat-icon weight-icon"><Scale size={17} /></div><div><span>WEIGHT</span><strong>{day?.weightKg ? `${day.weightKg} kg` : "Add weight"}</strong></div><input aria-label="Weight in kilograms" type="number" min="20" max="500" step="0.1" placeholder="kg" value={weightDraft} onChange={(event) => setWeightDraft(event.target.value)} onBlur={saveWeight} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></div>
               <div className="quick-stat water-stat"><div className="quick-stat-icon water-icon"><Droplets size={17} /></div><div><span>WATER</span><strong>{day?.waterGlasses ?? 0} <small>/ 8 glasses</small></strong></div><div className="water-actions"><button className="water-step" disabled={!day?.waterGlasses} onClick={() => patchDay({ waterGlasses: Math.max(0, (day?.waterGlasses ?? 0) - 1) })} aria-label="Remove a glass">−</button><button className="water-step" onClick={() => patchDay({ waterGlasses: Math.min(100, (day?.waterGlasses ?? 0) + 1) })} aria-label="Add a glass">+</button></div></div>
             </section>
 
@@ -422,27 +629,38 @@ function App() {
 
                 {recent.length > 0 && <div className="recent-foods"><span>ADD AGAIN</span>{recent.map((item) => <button key={item.id} className="recent-chip" onClick={() => addFood({ name: item.name, meal, kcal: item.kcal, grams: item.grams, proteinG: item.proteinG, carbsG: item.carbsG, fatG: item.fatG, source: item.source })}><Plus size={13} /><span>{item.name}</span><small>{number(item.kcal)} kcal</small></button>)}</div>}
 
-                <div className="scan-panel">
-                  <div className="scan-prompt"><span className="scan-icon"><Apple size={20} /></span><div><strong>Not sure of the numbers?</strong><span>Use one of today’s free photo estimates.</span></div></div>
-                  <label className="photo-consent"><input type="checkbox" checked={photoConsent} onChange={(event) => setGooglePhotoConsent(event.target.checked)} /><span>I understand Google’s free tier may use submitted photos to improve its products. I’ll avoid faces and private information.</span></label>
-                  <div className="scan-controls"><input aria-label="Meal note for photo estimate" maxLength={500} value={scanNote} onChange={(event) => setScanNote(event.target.value)} placeholder="Add a note (optional)" /><button className="scan-button" disabled={scanBusy || !photoConsent || !scanStatus?.enabled} title={!photoConsent ? "Acknowledge photo data use first" : !scanStatus?.enabled ? "No free photo scans available" : undefined} onClick={() => photoInput.current?.click()}>{scanBusy ? <span className="button-spinner" /> : <Upload size={16} />}{scanBusy ? "Analyzing" : "Scan meal"}</button><button className="scan-button secondary-scan" onClick={() => { setBarcodeModal(true); setBarcodeProduct(null); setBarcodeStatus(""); }}><Barcode size={17} /> Scan barcode</button><input ref={photoInput} className="visually-hidden" type="file" accept="image/*" capture="environment" onChange={(event) => scanPhoto(event.target.files?.[0])} /></div>
-                  <p className="scan-quota" role="status">{!scanStatus?.configured ? "Free photo scans are unavailable until a Gemini free-tier key is configured." : scanStatus.remaining ? `${scanStatus.remaining} of ${scanStatus.limit} free photo scans left today (UTC).` : "No free photo scans left today. The allowance resets at 00:00 UTC."}</p>
-                  <p className="approx-note">Photo estimates are approximate. You review everything before it is logged.</p>
-                </div>
+                <button className="scan-button secondary-scan barcode-scan-action" onClick={() => { setBarcodeModal(true); setBarcodeProduct(null); setBarcodeStatus(""); }}><Barcode size={17} /> Scan barcode</button>
               </div>
             </section>
           </>}
 
           {tab === "progress" && <Suspense fallback={<div className="loading-state">Loading progress</div>}><ProgressView days={progressDays} settings={settings} /></Suspense>}
+          {tab === "workout-plan" && <WorkoutPlanView plan={workoutPlan} defaultFocus={defaultWorkoutFocus(settings.goalType)} onGenerate={generateWorkoutPlan} onAdd={addPlanExercise} onChange={updatePlanExercise} onRemove={removePlanExercise} onSave={saveWorkoutPlan} saved={workoutPlanSaved} saving={workoutPlanBusy} />}
           {tab === "goals" && <GoalsView settings={settings} currentWeightKg={day?.weightKg ?? null} onSave={patchSettings} saved={goalSaved} setSaved={setGoalSaved} />}
+          {tab === "coaching-admin" && isCoachingAdmin && <CoachingInbox
+            enquiries={coachingEnquiries}
+            accountCount={coachingAccountCount}
+            newAccounts30d={coachingNewAccounts30d}
+            admins={coachingAdmins}
+            canManageAdmins={canManageCoachingAdmins}
+            adminEmailDraft={coachingAdminEmailDraft}
+            setAdminEmailDraft={setCoachingAdminEmailDraft}
+            adminInviteUrl={coachingAdminInviteUrl}
+            adminBusy={coachingAdminBusy}
+            onAddAdmin={addCoachingAdmin}
+            onCopyInvite={copyCoachingAdminInvite}
+            onRemoveAdmin={removeCoachingAdmin}
+            loading={coachingInboxLoading}
+            onRefresh={() => setCoachingInboxRefresh((value) => value + 1)}
+            onStatusChange={updateCoachingEnquiry}
+          />}
         </>}
       </main>
 
       <nav className="mobile-nav" aria-label="Main navigation">{nav.map(({ id, label, icon: Icon }) => <button key={id} className={tab === id ? "mobile-nav-item active" : "mobile-nav-item"} onClick={() => setTab(id)}><Icon size={19} /><span>{label}</span></button>)}</nav>
 
-      {reviewModal && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setReviewModal(false)}><section className="review-modal" role="dialog" aria-modal="true" aria-labelledby="review-title"><div className="modal-heading"><div><div className="eyebrow">PHOTO ESTIMATE</div><h2 id="review-title">Review your meal</h2></div><button className="icon-button" onClick={() => setReviewModal(false)} aria-label="Close review"><X size={19} /></button></div><div className="review-body"><img className="review-photo" src={reviewPhoto} alt="Meal for nutrition estimate" /><p className="approx-note">These photo estimates are approximate. Check portions and numbers before adding.</p><label className="meal-picker">Add to meal<select value={reviewMeal} onChange={(event) => setReviewMeal(event.target.value as Meal)}>{mealOrder.map((item) => <option key={item} value={item}>{item[0].toUpperCase() + item.slice(1)}</option>)}</select></label><div className="review-item-list">{reviewItems.map((item, index) => <ReviewFoodItem key={`${item.name}-${index}`} item={item} onName={(name) => setReviewItems((current) => current.map((entry, entryIndex) => entryIndex === index ? { ...entry, name, base: { ...entry.base, name } } : entry))} onGrams={(grams) => updateReviewGrams(index, grams)} onRemove={() => setReviewItems((current) => current.filter((_, itemIndex) => itemIndex !== index))} />)}</div><button className="add-item-button" onClick={() => { const item: MealAnalysisItem = { name: "New food", estimated_portion: "", grams: 100, kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0, confidence: "low", source: "manual" }; setReviewItems((current) => [...current, { ...item, base: item }]); }}><Plus size={15} /> Add an item</button><div className="review-total"><span>MEAL TOTAL</span><strong>{number(reviewItems.reduce((sum, item) => sum + item.kcal, 0))} kcal</strong></div></div><div className="modal-footer"><button className="plain-button" onClick={() => setReviewModal(false)}>Cancel</button><button className="primary-button" disabled={!reviewItems.length} onClick={saveReview}><Check size={16} /> Add to log</button></div></section></div>}
-
-      {barcodeModal && <BarcodeDialog product={barcodeProduct} grams={barcodeGrams} setGrams={setBarcodeGrams} status={barcodeStatus} onDetected={onBarcodeDetected} onClose={() => { setBarcodeModal(false); setBarcodeProduct(null); }} onAdd={async () => { if (!barcodeProduct) return; const factor = Number(barcodeGrams) / 100; await addFood({ name: barcodeProduct.name, meal, grams: Number(barcodeGrams), kcal: Math.round(barcodeProduct.kcalPer100g * factor), proteinG: Math.round(barcodeProduct.proteinPer100g * factor * 10) / 10, carbsG: Math.round(barcodeProduct.carbsPer100g * factor * 10) / 10, fatG: Math.round(barcodeProduct.fatPer100g * factor * 10) / 10, source: barcodeProduct.source }); setBarcodeModal(false); }} />}
+      {barcodeModal && <BarcodeDialog product={barcodeProduct} grams={barcodeGrams} setGrams={setBarcodeGrams} status={barcodeStatus} onDetected={onBarcodeDetected} onClose={() => { setBarcodeModal(false); setBarcodeProduct(null); }} onAdd={async () => { if (!barcodeProduct) return; const factor = Number(barcodeGrams) / 100; const added = await addFood({ name: barcodeProduct.name, meal, grams: Number(barcodeGrams), kcal: Math.round(barcodeProduct.kcalPer100g * factor), proteinG: Math.round(barcodeProduct.proteinPer100g * factor * 10) / 10, carbsG: Math.round(barcodeProduct.carbsPer100g * factor * 10) / 10, fatG: Math.round(barcodeProduct.fatPer100g * factor * 10) / 10, source: barcodeProduct.source }); if (added) setBarcodeModal(false); }} />}
+      {coachingModal && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && setCoachingModal(false)}><section className="coaching-modal" role="dialog" aria-modal="true" aria-labelledby="coaching-title"><div className="modal-heading"><div><div className="eyebrow">YOUR FIRST STEP</div><h2 id="coaching-title">Message your trainer</h2></div><button className="icon-button" type="button" onClick={() => setCoachingModal(false)} aria-label="Close coaching enquiry"><X size={19} /></button></div><form className="coaching-form" onSubmit={submitCoachingEnquiry}><p>Ask the trainer about your goals, availability, or the 3-day free coaching trial. They can reply to the email address you provide.</p><label>Your name<input required maxLength={80} value={coachingName} onChange={(event) => setCoachingName(event.target.value)} /></label><label>Email address<input required type="email" maxLength={254} value={coachingEmail} onChange={(event) => setCoachingEmail(event.target.value)} /></label><label>Main goal<select value={coachingGoal} onChange={(event) => setCoachingGoal(event.target.value as CoachingEnquiry["goal"])}><option value="lose-weight">Lose weight</option><option value="build-strength">Build strength</option><option value="improve-fitness">Improve fitness</option><option value="other">Other</option></select></label><label>When are you usually available?<input required maxLength={120} value={coachingAvailability} onChange={(event) => setCoachingAvailability(event.target.value)} placeholder="e.g. weekday evenings" /></label><label>Your message<textarea required maxLength={1000} rows={4} value={coachingMessage} onChange={(event) => setCoachingMessage(event.target.value)} placeholder="Write your question or enquiry to the trainer" /></label>{coachingFormError && <p className="form-error" role="alert">{coachingFormError}</p>}<div className="coaching-form-actions"><button className="plain-button" type="button" onClick={() => setCoachingModal(false)}>Cancel</button><button className="primary-button" type="submit" disabled={coachingSubmitting}>{coachingSubmitting ? <span className="button-spinner" /> : <Mail size={15} />}{coachingSubmitting ? "Sending…" : "Send message"}</button></div><small className="coaching-privacy">Your message is saved securely to the Fitbiter Coach inbox. Email notifications require RESEND_API_KEY and RESEND_FROM_EMAIL. No payment is taken here.</small></form></section></div>}
     </div>
   );
 }
@@ -479,8 +697,168 @@ function FoodLog({ foods, onRemove }: { foods: FoodEntry[]; onRemove: (id: strin
   })}</div>;
 }
 
-function ReviewFoodItem({ item, onName, onGrams, onRemove }: { item: ReviewItem; onName: (name: string) => void; onGrams: (grams: number) => void; onRemove: () => void }) {
-  return <div className="review-item"><div className="review-item-top"><input aria-label="Food name" value={item.name} onChange={(event) => onName(event.target.value)} /><span className={`confidence confidence-${item.confidence}`}>{item.confidence}</span><button className="icon-button" onClick={onRemove} aria-label={`Remove ${item.name}`}><Trash2 size={15} /></button></div><div className="review-numbers"><label>Grams<input aria-label={`${item.name} grams`} type="number" min="0" value={item.grams} onChange={(event) => onGrams(Number(event.target.value))} /></label><strong>{number(item.kcal)} kcal</strong><span>P {number(item.protein_g)}g</span><span>C {number(item.carbs_g)}g</span><span>F {number(item.fat_g)}g</span></div><small className="review-source">{item.source && item.source !== "photo_ai" ? `Nutrition cross-check: ${item.source === "usda" ? "USDA" : "Open Food Facts"}` : item.estimated_portion}</small></div>;
+function CoachingInbox({ enquiries, accountCount, newAccounts30d, admins, canManageAdmins, adminEmailDraft, setAdminEmailDraft, adminInviteUrl, adminBusy, onAddAdmin, onCopyInvite, onRemoveAdmin, loading, onRefresh, onStatusChange }: {
+  enquiries: CoachingEnquiry[];
+  accountCount: number;
+  newAccounts30d: number;
+  admins: CoachingAdmin[];
+  canManageAdmins: boolean;
+  adminEmailDraft: string;
+  setAdminEmailDraft: (value: string) => void;
+  adminInviteUrl: string;
+  adminBusy: boolean;
+  onAddAdmin: (event: React.FormEvent<HTMLFormElement>) => void;
+  onCopyInvite: () => void;
+  onRemoveAdmin: (email: string) => void;
+  loading: boolean;
+  onRefresh: () => void;
+  onStatusChange: (id: string, status: CoachingEnquiry["status"]) => void;
+}) {
+  const [filter, setFilter] = useState<"all" | CoachingEnquiry["status"]>("all");
+  const counts = {
+    all: enquiries.length,
+    new: enquiries.filter((enquiry) => enquiry.status === "new").length,
+    contacted: enquiries.filter((enquiry) => enquiry.status === "contacted").length,
+    closed: enquiries.filter((enquiry) => enquiry.status === "closed").length,
+  };
+  const visibleEnquiries = filter === "all" ? enquiries : enquiries.filter((enquiry) => enquiry.status === filter);
+  return <div className="page-view coaching-inbox">
+    <div className="eyebrow">FITBITER COACHING</div>
+    <div className="page-title-row"><div><h1>Trainer inbox</h1><p>Review user messages and manage coaching enquiries.</p></div><button className="lookup-button" type="button" onClick={onRefresh} disabled={loading}>{loading ? "Refreshing…" : "Refresh inbox"}</button></div>
+    <section className="coaching-admin-stats" aria-label="App account and enquiry totals">
+      <article><span>REGISTERED ACCOUNTS</span><strong>{number(accountCount)}</strong></article>
+      <article><span>JOINED IN LAST 30 DAYS</span><strong>{number(newAccounts30d)}</strong></article>
+      <article><span>TOTAL ENQUIRIES</span><strong>{number(counts.all)}</strong></article>
+      <article><span>NEED A REPLY</span><strong>{number(counts.new)}</strong></article>
+    </section>
+    {canManageAdmins && <section className="admin-management">
+      <div><h2>Administrator access</h2><p>Only you can manage this list. Invitees must sign in with the invited email and accept the one-time link.</p></div>
+      <form className="admin-management-form" onSubmit={onAddAdmin}>
+        <label htmlFor="new-admin-email">Invite admin by email</label>
+        <div><input id="new-admin-email" required type="email" maxLength={254} value={adminEmailDraft} onChange={(event) => setAdminEmailDraft(event.target.value)} placeholder="name@example.com" /><button className="primary-button" type="submit" disabled={adminBusy}>{adminBusy ? "Creating…" : "Create invite"}</button></div>
+      </form>
+      {adminInviteUrl && <div className="admin-invite-link"><label htmlFor="admin-invite-link">One-time invite link · expires in 7 days</label><div><input id="admin-invite-link" readOnly value={adminInviteUrl} /><button className="lookup-button" type="button" onClick={onCopyInvite}>Copy link</button></div><small>Share privately with the intended admin. Access is granted only after they sign in using the invited email and open the link.</small></div>}
+      <ul className="admin-access-list">{admins.map((admin) => <li key={admin.email}><span>{admin.email}</span><button className="plain-button" type="button" disabled={adminBusy} onClick={() => onRemoveAdmin(admin.email)}><Trash2 size={14} /> Remove</button></li>)}</ul>
+      {!admins.length && <p className="admin-access-empty">No additional admins have accepted an invitation yet.</p>}
+    </section>}
+    <div className="coaching-inbox-filters" aria-label="Filter enquiries">
+      {(["all", "new", "contacted", "closed"] as const).map((status) => <button key={status} className={filter === status ? "active" : ""} type="button" onClick={() => setFilter(status)}>{status === "all" ? "All" : status[0]!.toUpperCase() + status.slice(1)} <span>{counts[status]}</span></button>)}
+    </div>
+    {loading && !enquiries.length
+      ? <div className="loading-state"><span className="loader" />Loading trainer inbox</div>
+      : !visibleEnquiries.length
+        ? <div className="empty-log"><span className="empty-log-icon"><Mail size={20} /></span><strong>{filter === "all" ? "No enquiries yet" : `No ${filter} enquiries`}</strong><span>New coaching messages will appear here.</span></div>
+        : <div className="coaching-enquiry-list">{visibleEnquiries.map((enquiry) => <article className="coaching-enquiry" key={enquiry.id}>
+        <div className="coaching-enquiry-heading"><div><h2>{enquiry.name}</h2><a href={`mailto:${enquiry.email}`}>{enquiry.email}</a></div><span className={`enquiry-status ${enquiry.status}`}>{enquiry.status}</span></div>
+        <div className="coaching-enquiry-meta"><span>{enquiry.goal.replaceAll("-", " ")}</span><span><Clock3 size={14} /> {enquiry.availability}</span><span>{new Date(enquiry.createdAt).toLocaleString()}</span></div>
+        {enquiry.message && <p className="coaching-enquiry-message">{enquiry.message}</p>}
+        <label className="enquiry-status-select">Status<select value={enquiry.status} onChange={(event) => onStatusChange(enquiry.id, event.target.value as CoachingEnquiry["status"])}><option value="new">New</option><option value="contacted">Contacted</option><option value="closed">Closed</option></select></label>
+      </article>)}</div>}
+  </div>;
+}
+
+function WorkoutPlanView({ plan, defaultFocus, onGenerate, onAdd, onChange, onRemove, onSave, saved, saving }: {
+  plan: WorkoutPlan;
+  defaultFocus: WorkoutPlanFocus;
+  onGenerate: (preferences: WorkoutPlanPreferences) => void;
+  onAdd: (dayIndex: number) => void;
+  onChange: (dayIndex: number, exerciseId: string, patch: Partial<WorkoutPlanExercise>) => void;
+  onRemove: (dayIndex: number, exerciseId: string) => void;
+  onSave: () => void;
+  saved: boolean;
+  saving: boolean;
+}) {
+  const [exerciseCatalog, setExerciseCatalog] = useState<ExerciseCatalogEntry[]>([]);
+  const [exerciseCatalogLoading, setExerciseCatalogLoading] = useState(true);
+  const [exerciseCatalogError, setExerciseCatalogError] = useState("");
+  const [preferences, setPreferences] = useState<WorkoutPlanPreferences>(() => plan.preferences ?? {
+    focus: defaultFocus,
+    daysPerWeek: 3,
+    equipment: "bodyweight",
+    sessionMinutes: 30,
+  });
+  const splitEligible = preferences.equipment === "gym" && preferences.daysPerWeek >= 5;
+  const trainingStyle = preferences.trainingStyle ?? (preferences.daysPerWeek === 6 ? "push-pull-legs" : "balanced");
+  useEffect(() => {
+    if (plan.preferences) setPreferences(plan.preferences);
+  }, [plan.preferences]);
+  useEffect(() => {
+    let active = true;
+    void api<ExerciseCatalogEntry[]>("/api/exercises").then((entries) => {
+      if (active) setExerciseCatalog(entries);
+    }).catch((reason: unknown) => {
+      if (active) setExerciseCatalogError(reason instanceof Error ? reason.message : "Could not load the exercise catalogue.");
+    }).finally(() => {
+      if (active) setExerciseCatalogLoading(false);
+    });
+    return () => { active = false; };
+  }, []);
+  const updatePreferences = (patch: Partial<WorkoutPlanPreferences>) =>
+    setPreferences((current) => ({ ...current, ...patch }));
+  const planSessionMinutes = plan.preferences?.sessionMinutes ?? preferences.sessionMinutes;
+  const warmUpTime = planSessionMinutes === 20 ? "3-5 min" : "5-10 min";
+  const coolDownTime = planSessionMinutes === 20 ? "2-3 min" : "5-10 min";
+
+  return <form className="page-view workout-plan-view" onSubmit={(event) => { event.preventDefault(); onSave(); }}>
+    <div className="eyebrow">YOUR TRAINING</div>
+    <div className="page-title-row"><div><h1>Workout plan</h1><p>Generate a beginner-friendly routine around your goals, schedule, and equipment, then edit it anytime.</p></div><span className="goals-emblem"><Dumbbell size={23} /></span></div>
+    <section className="plan-builder">
+      <div className="goal-section-head"><span className="goal-step"><Dumbbell size={14} /></span><div><h2>Build your workout plan</h2><p>Your saved goal preselects a focus. Full-gym users training 5–7 days can choose an experienced split style.</p></div></div>
+      <div className="plan-preferences">
+        <label>Focus<select value={preferences.focus} onChange={(event) => updatePreferences({ focus: event.target.value as WorkoutPlanFocus })}>
+          <option value="fat-loss">Lose weight / fat loss</option><option value="strength">Build strength / muscle</option><option value="general-fitness">General fitness</option><option value="stamina">Improve stamina</option>
+        </select></label>
+        <label>Days each week<select value={preferences.daysPerWeek} onChange={(event) => updatePreferences({ daysPerWeek: Number(event.target.value) as WorkoutPlanPreferences["daysPerWeek"] })}>
+          {[2, 3, 4, 5, 6, 7].map((days) => <option key={days} value={days}>{days} days</option>)}
+        </select></label>
+        <label>Available equipment<select value={preferences.equipment} onChange={(event) => updatePreferences({ equipment: event.target.value as WorkoutPlanEquipment })}>
+          <option value="bodyweight">No equipment</option><option value="dumbbells">Dumbbells</option><option value="gym">Full gym</option>
+        </select></label>
+        {splitEligible && <label>Training style<select value={trainingStyle} onChange={(event) => updatePreferences({ trainingStyle: event.target.value as WorkoutPlanTrainingStyle })}>
+          <option value="balanced">Balanced plan (recommended)</option><option value="push-pull-legs">Push / pull / legs</option><option value="body-part">One muscle group per day (experienced)</option>
+        </select></label>}
+        <label>Time per session<select value={preferences.sessionMinutes} onChange={(event) => updatePreferences({ sessionMinutes: Number(event.target.value) as WorkoutPlanPreferences["sessionMinutes"] })}>
+          {[20, 30, 45, 60].map((minutes) => <option key={minutes} value={minutes}>{minutes} minutes</option>)}
+        </select></label>
+      </div>
+      <div className="plan-builder-footer"><p>Session length changes the workout: 20-minute plans prioritize two movements, while longer plans add exercises, sets, and rest time. Warm-up and cool-down are included. Experienced gym users can choose push/pull/legs or one muscle group per day; the seven-day split schedules an easier recovery day. See <a href="https://www.nhs.uk/live-well/exercise/strength-exercises/" target="_blank" rel="noreferrer">NHS beginner strength exercises</a> and <a href="https://www.nhs.uk/live-well/exercise/physical-activity-guidelines-for-adults-aged-19-to-64/" target="_blank" rel="noreferrer">weekly activity guidance</a>.</p><button className="primary-button" type="button" onClick={() => onGenerate(preferences)}><Dumbbell size={16} /> Create workout plan</button></div>
+    </section>
+    <datalist id="exercise-catalog">
+      {exerciseCatalog.map((exercise) => <option key={exercise.id} value={exercise.name} label={[
+        exercise.category,
+        exercise.equipment.length ? exercise.equipment.join(", ") : "No equipment listed",
+        exercise.author ? `by ${exercise.author}` : "",
+        exercise.license,
+      ].filter(Boolean).join(" · ")} />)}
+    </datalist>
+    <p className={exerciseCatalogError ? "exercise-catalog-message error" : "exercise-catalog-message"} role="status">
+      {exerciseCatalogLoading
+        ? "Loading exercise options…"
+        : exerciseCatalogError
+          ? `${exerciseCatalogError} Type a custom exercise name instead.`
+          : <>Choose a suggestion or type your own. Exercise catalogue: <a href="https://wger.de/en/software/api" target="_blank" rel="noreferrer">wger</a> (licence and contributor shown for each choice).</>}
+    </p>
+    <div className="plan-days">{plan.days.map((day, dayIndex) => <section className="plan-day" key={day.day}>
+      <div className="plan-day-heading"><div><h2>{day.day}</h2><span>{day.label ?? (day.exercises.length ? `${day.exercises.length} ${day.exercises.length === 1 ? "exercise" : "exercises"}` : "Rest day")}</span>{day.label && <small>{day.exercises.length} exercises</small>}</div><button className="text-action" type="button" onClick={() => onAdd(dayIndex)}><Plus size={15} /> Add exercise</button></div>
+      {day.warmUp && <div className="plan-day-prep">
+        <p><strong>Warm-up · {warmUpTime}</strong>{day.warmUp}</p>
+        <a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${warmUpTime} ${day.label ?? "full body"} dynamic warm up before workout`)}`} target="_blank" rel="noreferrer"><ExternalLink size={13} /> Find a guided warm-up video</a>
+      </div>}
+      {day.exercises.length > 0 && <div className="plan-exercises">{day.exercises.map((exercise) => <div className="plan-exercise" key={exercise.id}>
+        <label className="plan-exercise-name">Exercise<input required maxLength={120} list="exercise-catalog" value={exercise.name} placeholder="Type or choose an exercise" onChange={(event) => onChange(dayIndex, exercise.id, { name: event.target.value })} /></label>
+        <label>Sets<input required type="number" min="1" max="20" value={exercise.sets} onChange={(event) => onChange(dayIndex, exercise.id, { sets: Number(event.target.value) })} /></label>
+        <label>Reps<input required maxLength={40} value={exercise.reps} placeholder="e.g. 8-12" onChange={(event) => onChange(dayIndex, exercise.id, { reps: event.target.value })} /></label>
+        <label className="plan-exercise-notes">Notes <span>(optional)</span><input maxLength={200} value={exercise.notes} placeholder="e.g. Use lighter weight" onChange={(event) => onChange(dayIndex, exercise.id, { notes: event.target.value })} /></label>
+        <button className="icon-button plan-remove" type="button" onClick={() => onRemove(dayIndex, exercise.id)} aria-label={`Remove ${exercise.name || "exercise"} from ${day.day}`}><Trash2 size={15} /></button>
+        {exercise.name.trim() && <a className="plan-video-link" href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${exercise.name} beginner exercise tutorial`)}`} target="_blank" rel="noreferrer"><ExternalLink size={13} /> Find video demos</a>}
+      </div>)}</div>}
+      {day.coolDown && <div className="plan-day-prep plan-day-cooldown">
+        <p><strong>Cool-down & stretching · {coolDownTime}</strong>{day.coolDown}</p>
+        <a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`${coolDownTime} ${day.label ?? "full body"} post workout cool down stretches`)}`} target="_blank" rel="noreferrer"><ExternalLink size={13} /> Find a guided cool-down video</a>
+      </div>}
+    </section>)}</div>
+    <div className="plan-save-row"><span>{saved ? <><Check size={15} /> Plan saved</> : "Changes are saved when you choose Save plan."}</span><button className="primary-button" type="submit" disabled={saving}>{saving ? <span className="button-spinner" /> : <Check size={16} />}{saving ? "Saving…" : "Save plan"}</button></div>
+  </form>;
 }
 
 function GoalsView({ settings, currentWeightKg, onSave, saved, setSaved }: { settings: Settings; currentWeightKg: number | null; onSave: (patch: Partial<Settings>) => Promise<Settings>; saved: boolean; setSaved: (saved: boolean) => void }) {
@@ -526,7 +904,7 @@ function GoalsView({ settings, currentWeightKg, onSave, saved, setSaved }: { set
 
       <section className="goal-section"><div className="goal-section-head"><span className="goal-step">02</span><div><h2>Macro targets <span className="optional-label">OPTIONAL</span></h2><p>Daily grams for the nutrients you track.</p></div></div><div className="goal-input-grid three"><NumberField label="Protein" value={form.proteinTarget} suffix="g" onChange={(value) => update({ proteinTarget: value })} /><NumberField label="Carbs" value={form.carbsTarget} suffix="g" onChange={(value) => update({ carbsTarget: value })} /><NumberField label="Fat" value={form.fatTarget} suffix="g" onChange={(value) => update({ fatTarget: value })} /></div></section>
 
-      <section className="goal-section"><div className="goal-section-head"><span className="goal-step">03</span><div><h2>Movement</h2><p>Build a weekly rhythm that works for you.</p></div></div><div className="goal-input-grid"><NumberField label="Active minutes / week" value={form.weeklyActiveMinutes} suffix="min" onChange={(value) => update({ weeklyActiveMinutes: value ?? 0 })} /><label className="toggle-setting"><span><strong>Count exercise calories</strong><small>Add logged workouts to your food budget.</small></span><input type="checkbox" checked={form.includeExerciseCalories} onChange={(event) => update({ includeExerciseCalories: event.target.checked })} /><i /></label><label className="toggle-setting full-toggle"><span><strong>Keep meal thumbnails</strong><small>Save a small photo with each entry from a scan.</small></span><input type="checkbox" checked={form.keepPhotoThumbnails} onChange={(event) => update({ keepPhotoThumbnails: event.target.checked })} /><i /></label></div></section>
+      <section className="goal-section"><div className="goal-section-head"><span className="goal-step">03</span><div><h2>Movement</h2><p>Build a weekly rhythm that works for you.</p></div></div><div className="goal-input-grid"><NumberField label="Active minutes / week" value={form.weeklyActiveMinutes} suffix="min" onChange={(value) => update({ weeklyActiveMinutes: value ?? 0 })} /><label className="toggle-setting"><span><strong>Count exercise calories</strong><small>Add logged workouts to your food budget.</small></span><input type="checkbox" checked={form.includeExerciseCalories} onChange={(event) => update({ includeExerciseCalories: event.target.checked })} /><i /></label></div></section>
 
       <section className="goal-section estimator-section"><div className="goal-section-head"><span className="goal-step">04</span><div><h2>Build your target plan</h2><p>Mifflin–St Jeor calories and an estimated pace.</p></div></div><div className="goal-input-grid estimator-grid"><label>Sex<select value={form.sex ?? ""} onChange={(event) => update({ sex: (event.target.value || null) as Settings["sex"] })}><option value="">Choose</option><option value="female">Female</option><option value="male">Male</option></select></label><NumberField label="Age" value={form.age} suffix="years" onChange={(value) => update({ age: value })} /><NumberField label="Height" value={form.heightCm} suffix="cm" onChange={(value) => update({ heightCm: value })} /><label>Activity level<select value={form.activityFactor ?? "1.45"} onChange={(event) => update({ activityFactor: Number(event.target.value) })}><option value="1.2">Mostly sitting</option><option value="1.375">Lightly active</option><option value="1.45">Moderately active</option><option value="1.725">Very active</option><option value="1.9">Highly active</option></select></label></div><div className="estimate-row"><button className="lookup-button" type="button" disabled={planBusy} onClick={buildPlan}>{planBusy ? "Building plan…" : "Build my plan"}</button></div>{plan && <div className="weight-plan" role="status"><div className="weight-plan-heading"><span>YOUR STARTING PLAN</span><strong>{plan.estimatedWeeks === 0 ? "At your target range" : plan.estimatedWeeks == null ? "Review the pace" : `About ${plan.estimatedWeeks} weeks to target`}</strong></div><div className="plan-calories"><strong>{number(plan.calorieTarget)} <small>kcal / day</small></strong><span>Suggested starting intake</span></div><div className="plan-details"><div><span>MAINTENANCE ESTIMATE</span><strong>{number(plan.maintenanceCalories)} kcal</strong></div><div><span>EXPECTED PACE</span><strong>{plan.weeklyChangeKg ? `${plan.goalType === "lose" ? "−" : "+"}${plan.weeklyChangeKg.toFixed(2)} kg / week` : "No change"}</strong></div></div><p>{plan.note}</p><button className="lookup-button" type="button" onClick={() => update({ currentWeightKg: plan.currentWeightKg, targetWeightKg: plan.targetWeightKg, calorieTarget: plan.calorieTarget })}>Use this plan</button></div>}<p className="estimator-note">Enter your current weight, target weight, age, height, sex, activity, and goal direction. Estimates are approximate, with a minimum of 1,200 kcal for women and 1,500 kcal for men; they are not medical advice.</p></section>
 

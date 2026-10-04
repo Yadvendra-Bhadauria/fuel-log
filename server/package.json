@@ -4,13 +4,14 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "generate": "prisma generate --schema prisma/schema.prisma",
+    "generate": "npx --yes --package=prisma@6.19.3 prisma generate --schema prisma/schema.prisma",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server/src/index.js",
     "test": "vitest run",
     "db:push": "dotenv -e ../.env -- prisma db push --schema prisma/schema.prisma",
     "db:studio": "dotenv -e ../.env -- prisma studio --schema prisma/schema.prisma",
-    "db:turso:init": "dotenv -e ../.env -- tsx scripts/init-turso.ts"
+    "db:turso:init": "dotenv -e ../.env -- tsx scripts/init-turso.ts",
+    "db:turso:migrate-password-reset": "dotenv -e ../.env -- tsx scripts/migrate-password-reset.ts"
   },
   "dependencies": {
     "@fuel-log/shared": "1.0.0",
@@ -21,7 +22,6 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "express-rate-limit": "^7.5.0",
-    "google-auth-library": "^11.1.0",
     "zod": "^3.24.2"
   },
   "devDependencies": {
